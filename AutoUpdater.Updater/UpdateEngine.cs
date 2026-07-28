@@ -67,7 +67,7 @@ internal sealed class UpdateEngine(
             options.TargetDirectory, ".autoupdater", "installed-version.txt");
         var previousVersion = File.Exists(installedVersionPath)
             ? (await File.ReadAllTextAsync(installedVersionPath, cancellationToken)).Trim()
-            : "unknown";
+            : options.CurrentVersion ?? "unknown";
         var backupDirectory = Path.Combine(
             options.BackupRoot, $"{DateTime.Now:yyyyMMddHHmmss}_{SanitizeName(previousVersion)}");
         Report(UpdateStage.BackingUp, 62, "正在备份本次变更文件", previousVersion);
@@ -123,6 +123,14 @@ internal sealed class UpdateEngine(
             Report(UpdateStage.Installing, 70, "正在恢复本次变更文件", Path.GetFileName(backup));
             var restoredVersion = await RestoreSelectedBackupAsync(
                 backup, options.TargetDirectory, cancellationToken);
+            if (string.IsNullOrWhiteSpace(restoredVersion) ||
+                restoredVersion.Equals("unknown", StringComparison.OrdinalIgnoreCase))
+            {
+                restoredVersion = !string.IsNullOrWhiteSpace(options.TargetVersion)
+                    ? options.TargetVersion
+                    : TryReadExecutableVersion(
+                        options.TargetDirectory, options.RestartExecutable);
+            }
             if (!string.IsNullOrWhiteSpace(restoredVersion))
                 await WriteInstalledVersionAsync(
                     options.TargetDirectory, restoredVersion, cancellationToken);
@@ -597,6 +605,26 @@ internal sealed class UpdateEngine(
         foreach (var character in Path.GetInvalidFileNameChars())
             value = value.Replace(character, '_');
         return string.IsNullOrWhiteSpace(value) ? "unknown" : value;
+    }
+
+    private static string? TryReadExecutableVersion(
+        string targetDirectory, string executable)
+    {
+        try
+        {
+            var path = Path.IsPathRooted(executable)
+                ? executable
+                : Path.Combine(targetDirectory, executable);
+            if (!File.Exists(path)) return null;
+            var info = FileVersionInfo.GetVersionInfo(path);
+            return string.IsNullOrWhiteSpace(info.FileVersion)
+                ? info.ProductVersion
+                : info.FileVersion;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private void Report(

@@ -449,6 +449,8 @@ namespace AutoUpdater.Client.Net462
             parts.Add("--restart");
             parts.Add(QuoteArgument(
                 _options.RestartExecutablePath ?? "卷绕机.exe"));
+            parts.Add("--current-version");
+            parts.Add(QuoteArgument(_options.CurrentVersion));
             parts.Add("--request-id");
             parts.Add(requestId.ToString("N"));
             parts.Add("--device-id");

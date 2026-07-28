@@ -15,6 +15,7 @@ internal sealed record UpdaterOptions
     public IPAddress? ControllerAddress { get; init; }
     public int ControllerPort { get; init; } = 45677;
     public string? TargetVersion { get; init; }
+    public string? CurrentVersion { get; init; }
     public required string BackupRoot { get; init; }
     public required string WorkRoot { get; init; }
     public required string LogPath { get; init; }
@@ -92,6 +93,7 @@ internal sealed record UpdaterOptions
             ControllerAddress = controllerAddress,
             ControllerPort = controllerPort,
             TargetVersion = values.GetValueOrDefault("--target-version"),
+            CurrentVersion = values.GetValueOrDefault("--current-version"),
             BackupRoot = Path.GetFullPath(values.GetValueOrDefault("--backup-root") ??
                                           Path.Combine(metadataRoot, "backups")),
             WorkRoot = Path.Combine(metadataRoot, "work", requestId.ToString("N")),

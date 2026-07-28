@@ -548,6 +548,7 @@ public sealed class EmbeddedUpdateClient : IDisposable
             "--target", target,
             "--process-id", Environment.ProcessId.ToString(),
             "--restart", restart,
+            "--current-version", _options.CurrentVersion,
             "--request-id", requestId.ToString("N"),
             "--device-id", _options.DeviceId,
             "--controller-ip", controller.Address.ToString(),

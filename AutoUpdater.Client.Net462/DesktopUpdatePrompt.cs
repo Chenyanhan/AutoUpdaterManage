@@ -1,11 +1,20 @@
 using System;
 using System.Drawing;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace AutoUpdater.Client.Net462
 {
     internal static class DesktopUpdatePrompt
     {
+        private const int SwRestore = 9;
+
+        [DllImport("user32.dll")]
+        private static extern bool SetForegroundWindow(IntPtr window);
+
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindow(IntPtr window, int command);
+
         public static UpdateDecision ShowUpdate(
             UpdateCommandContext context,
             string deviceName)
@@ -44,7 +53,7 @@ namespace AutoUpdater.Client.Net462
             using (var root = new TableLayoutPanel())
             using (var headingLabel = new Label())
             using (var detailLabel = new Label())
-            using (var buttonPanel = new FlowLayoutPanel())
+            using (var buttonPanel = new Panel())
             using (var postponeButton = CreateButton(
                        postponeText,
                        Color.FromArgb(232, 237, 245),
@@ -63,6 +72,7 @@ namespace AutoUpdater.Client.Net462
                 dialog.ShowInTaskbar = true;
                 dialog.TopMost = true;
                 dialog.BackColor = Color.White;
+                dialog.AutoScaleMode = AutoScaleMode.Dpi;
                 dialog.Font = new Font(
                     "Microsoft YaHei UI", 9F, FontStyle.Regular);
 
@@ -70,11 +80,14 @@ namespace AutoUpdater.Client.Net462
                 root.Padding = new Padding(28, 26, 28, 24);
                 root.ColumnCount = 1;
                 root.RowCount = 3;
-                root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+                root.ColumnStyles.Add(
+                    new ColumnStyle(SizeType.Percent, 100F));
+                root.RowStyles.Add(
+                    new RowStyle(SizeType.Absolute, 62F));
                 root.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
                 root.RowStyles.Add(new RowStyle(SizeType.Absolute, 42F));
 
-                headingLabel.AutoSize = true;
+                headingLabel.AutoSize = false;
                 headingLabel.Dock = DockStyle.Fill;
                 headingLabel.Font = new Font(
                     "Microsoft YaHei UI", 13.5F, FontStyle.Bold);
@@ -92,17 +105,24 @@ namespace AutoUpdater.Client.Net462
                 detailLabel.Margin = Padding.Empty;
 
                 buttonPanel.Dock = DockStyle.Fill;
-                buttonPanel.FlowDirection = FlowDirection.RightToLeft;
-                buttonPanel.WrapContents = false;
                 buttonPanel.Padding = Padding.Empty;
                 buttonPanel.Margin = Padding.Empty;
 
-                acceptButton.Margin = new Padding(12, 0, 0, 0);
+                acceptButton.Margin = Padding.Empty;
                 postponeButton.Margin = Padding.Empty;
                 acceptButton.DialogResult = DialogResult.OK;
                 postponeButton.DialogResult = DialogResult.Cancel;
-                buttonPanel.Controls.Add(acceptButton);
                 buttonPanel.Controls.Add(postponeButton);
+                buttonPanel.Controls.Add(acceptButton);
+                buttonPanel.Layout += delegate
+                {
+                    acceptButton.Left =
+                        buttonPanel.ClientSize.Width - acceptButton.Width;
+                    acceptButton.Top = 0;
+                    postponeButton.Left =
+                        acceptButton.Left - 12 - postponeButton.Width;
+                    postponeButton.Top = 0;
+                };
 
                 root.Controls.Add(headingLabel, 0, 0);
                 root.Controls.Add(detailLabel, 0, 1);
@@ -110,6 +130,13 @@ namespace AutoUpdater.Client.Net462
                 dialog.Controls.Add(root);
                 dialog.AcceptButton = acceptButton;
                 dialog.CancelButton = postponeButton;
+                dialog.Shown += delegate
+                {
+                    ShowWindow(dialog.Handle, SwRestore);
+                    dialog.BringToFront();
+                    dialog.Activate();
+                    SetForegroundWindow(dialog.Handle);
+                };
 
                 return dialog.ShowDialog() == DialogResult.OK
                     ? UpdateDecision.InstallNow
