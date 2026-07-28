@@ -7,6 +7,7 @@ using DevExpress.Xpf.Core;
 using AutoUpdaterManage.Models;
 using AutoUpdaterManage.Services;
 using MessageBox = System.Windows.MessageBox;
+using OpenFileDialog = Microsoft.Win32.OpenFileDialog;
 
 namespace AutoUpdaterManage;
 
@@ -14,12 +15,19 @@ public partial class MainWindow : ThemedWindow
 {
     private readonly UdpControllerService _controllerService = new();
     private readonly TaskHistoryStore _taskHistoryStore = new();
+    private readonly IDatabaseProvider _databaseProvider =
+        new SqliteDatabaseProvider();
     private readonly ICollectionView _deviceView;
     private readonly ICollectionView _taskView;
     private System.Net.IPAddress? _broadcastAddress;
+    private DatabaseTableInfo? _currentDatabaseTable;
+    private int _databasePageNumber = 1;
+    private const int DatabasePageSize = 100;
+    private DatabasePage? _databasePage;
 
     public ObservableCollection<DeviceInfo> Devices { get; } = [];
     public ObservableCollection<UpdateTaskRecord> Tasks { get; } = [];
+    public ObservableCollection<DatabaseChangeDraft> DatabaseDrafts { get; } = [];
 
     public MainWindow()
     {
@@ -55,6 +63,7 @@ public partial class MainWindow : ThemedWindow
         {
             _controllerService.Dispose();
             _taskHistoryStore.Dispose();
+            _ = _databaseProvider.DisposeAsync();
         };
         UpdateSummary();
     }
@@ -239,6 +248,147 @@ public partial class MainWindow : ThemedWindow
         if (window.ShowDialog() == true &&
             !string.IsNullOrWhiteSpace(window.GeneratedManifestPath))
             UpdatePathBox.Text = window.GeneratedManifestPath;
+    }
+
+    private void BrowseDatabase_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new OpenFileDialog
+        {
+            Title = "选择SQLite数据库",
+            Filter = "SQLite数据库 (*.db;*.sqlite;*.sqlite3)|*.db;*.sqlite;*.sqlite3|所有文件 (*.*)|*.*",
+            CheckFileExists = true
+        };
+        if (dialog.ShowDialog(this) == true)
+            DatabasePathBox.Text = dialog.FileName;
+    }
+
+    private async void ConnectDatabase_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            DatabaseStatusText.Text = "正在连接SQLite数据库…";
+            await _databaseProvider.ConnectAsync(DatabasePathBox.Text.Trim());
+            var tables = await _databaseProvider.GetTablesAsync();
+            DatabaseTablesList.ItemsSource = tables;
+            DatabaseConnectionText.Text =
+                $"SQLite · {tables.Count} 张表";
+            DatabaseStatusText.Text =
+                $"连接成功：{DatabasePathBox.Text.Trim()}";
+            _currentDatabaseTable = null;
+            DatabaseDataGrid.ItemsSource = null;
+            CurrentTableText.Text = "请选择数据表";
+            DatabasePageText.Text = "第 0 / 0 页";
+        }
+        catch (Exception ex)
+        {
+            DatabaseStatusText.Text = $"连接失败：{ex.Message}";
+            MessageBox.Show(
+                ex.Message,
+                "数据库连接失败",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+        }
+    }
+
+    private async void DatabaseTable_SelectionChanged(
+        object sender, SelectionChangedEventArgs e)
+    {
+        if (DatabaseTablesList.SelectedItem is not DatabaseTableInfo table)
+            return;
+        _currentDatabaseTable = table;
+        _databasePageNumber = 1;
+        await LoadDatabasePageAsync();
+    }
+
+    private async Task LoadDatabasePageAsync()
+    {
+        if (_currentDatabaseTable is null) return;
+        try
+        {
+            DatabaseStatusText.Text =
+                $"正在读取 {_currentDatabaseTable.Name}…";
+            _databasePage = await _databaseProvider.QueryPageAsync(
+                _currentDatabaseTable.Name,
+                _databasePageNumber,
+                DatabasePageSize);
+            DatabaseDataGrid.ItemsSource = _databasePage.Data.DefaultView;
+            CurrentTableText.Text =
+                $"{_currentDatabaseTable.Name} · {_databasePage.TotalRows} 行";
+            DatabasePageText.Text =
+                $"第 {_databasePage.PageNumber} / {_databasePage.TotalPages} 页";
+            DatabaseStatusText.Text =
+                $"已读取 {_databasePage.Data.Rows.Count} 行，每页最多 {DatabasePageSize} 行";
+        }
+        catch (Exception ex)
+        {
+            DatabaseStatusText.Text = $"读取失败：{ex.Message}";
+        }
+    }
+
+    private async void PreviousDatabasePage_Click(
+        object sender, RoutedEventArgs e)
+    {
+        if (_databasePageNumber <= 1) return;
+        _databasePageNumber--;
+        await LoadDatabasePageAsync();
+    }
+
+    private async void NextDatabasePage_Click(
+        object sender, RoutedEventArgs e)
+    {
+        if (_databasePage is null ||
+            _databasePageNumber >= _databasePage.TotalPages)
+            return;
+        _databasePageNumber++;
+        await LoadDatabasePageAsync();
+    }
+
+    private async void AddDatabaseDraft_Click(
+        object sender, RoutedEventArgs e)
+    {
+        if (_currentDatabaseTable is null)
+        {
+            MessageBox.Show(
+                "请先选择数据表。",
+                "尚未选择数据表",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return;
+        }
+        try
+        {
+            var columns = await _databaseProvider.GetColumnsAsync(
+                _currentDatabaseTable.Name);
+            var window = new DatabaseRowDraftWindow(
+                _currentDatabaseTable.Name, columns)
+            {
+                Owner = this
+            };
+            if (window.ShowDialog() == true && window.Draft is not null)
+            {
+                DatabaseDrafts.Add(window.Draft);
+                DatabaseStatusText.Text =
+                    $"已添加草稿，待同步变更共 {DatabaseDrafts.Count} 条";
+            }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                ex.Message,
+                "无法创建数据草稿",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+        }
+    }
+
+    private void RemoveDatabaseDraft_Click(
+        object sender, RoutedEventArgs e)
+    {
+        if (DatabaseDraftsList.SelectedItem is not DatabaseChangeDraft draft)
+            return;
+        DatabaseDrafts.Remove(draft);
+        DatabaseStatusText.Text =
+            $"待同步变更共 {DatabaseDrafts.Count} 条";
     }
 
     private async void Rollback_Click(object sender, RoutedEventArgs e)

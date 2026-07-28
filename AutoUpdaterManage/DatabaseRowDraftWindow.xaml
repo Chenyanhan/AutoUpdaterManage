@@ -1,0 +1,51 @@
+<dx:ThemedWindow x:Class="AutoUpdaterManage.DatabaseRowDraftWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:dx="http://schemas.devexpress.com/winfx/2008/xaml/core"
+        Title="新增数据草稿" Width="580" Height="650"
+        MinHeight="480" WindowStartupLocation="CenterOwner"
+        Background="#F3F6FA" ShowIcon="True" Icon="Assets/AppIcon.ico">
+    <Grid Margin="22">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <StackPanel>
+            <TextBlock x:Name="HeadingText" FontSize="22" FontWeight="SemiBold"/>
+            <TextBlock Text="这里只创建待同步变更，不会立即写入源数据库。"
+                       Margin="0,6,0,16" Foreground="#667085"/>
+        </StackPanel>
+        <Border Grid.Row="1" Background="White" CornerRadius="9" Padding="18">
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <ItemsControl ItemsSource="{Binding Fields}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Grid Margin="0,0,0,14">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="180"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel VerticalAlignment="Center">
+                                    <TextBlock Text="{Binding Name}" FontWeight="SemiBold"/>
+                                    <TextBlock Text="{Binding Description}" FontSize="11"
+                                               Foreground="#667085"/>
+                                </StackPanel>
+                                <TextBox Grid.Column="1" Text="{Binding Value, UpdateSourceTrigger=PropertyChanged}"
+                                         Padding="10,8"/>
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </ScrollViewer>
+        </Border>
+        <StackPanel Grid.Row="2" Orientation="Horizontal"
+                    HorizontalAlignment="Right" Margin="0,16,0,0">
+            <Button Content="取消" Padding="18,9" Margin="0,0,10,0"
+                    Click="Cancel_Click"/>
+            <Button Content="加入待同步列表" Padding="18,9"
+                    Background="#2563EB" Foreground="White"
+                    Click="Save_Click"/>
+        </StackPanel>
+    </Grid>
+</dx:ThemedWindow>
