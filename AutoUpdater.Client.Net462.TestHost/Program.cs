@@ -17,6 +17,9 @@ namespace AutoUpdater.Client.Net462.TestHost
             var connectionString =
                 Environment.GetEnvironmentVariable(
                     "AUTOUPDATER_TEST_DATABASE");
+            var automatedDecision =
+                Environment.GetEnvironmentVariable(
+                    "AUTOUPDATER_TEST_DECISION");
             var client = new EmbeddedUpdateClient(
                 new EmbeddedClientOptions
                 {
@@ -30,10 +33,26 @@ namespace AutoUpdater.Client.Net462.TestHost
                         "AutoUpdater.Client.Net462.TestHost.exe",
                     DatabaseConnectionString = connectionString
                 });
-            client.UpdateDecisionRequired += context =>
-                UpdateDecision.Postpone;
-            client.RollbackDecisionRequired += context =>
-                UpdateDecision.Postpone;
+            if (string.Equals(
+                    automatedDecision,
+                    "accept",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                client.UpdateDecisionRequired += context =>
+                    UpdateDecision.InstallNow;
+                client.RollbackDecisionRequired += context =>
+                    UpdateDecision.InstallNow;
+            }
+            else if (string.Equals(
+                         automatedDecision,
+                         "postpone",
+                         StringComparison.OrdinalIgnoreCase))
+            {
+                client.UpdateDecisionRequired += context =>
+                    UpdateDecision.Postpone;
+                client.RollbackDecisionRequired += context =>
+                    UpdateDecision.Postpone;
+            }
             client.Error += exception =>
                 Console.WriteLine("ERROR " + exception.Message);
             client.ShutdownRequested += () =>
@@ -42,6 +61,10 @@ namespace AutoUpdater.Client.Net462.TestHost
 
             Console.WriteLine(
                 "NET462_HOST_READY device=NET462-PROBE port=" + port);
+            Console.WriteLine(
+                string.IsNullOrWhiteSpace(automatedDecision)
+                    ? "UPDATE_DECISION=manual"
+                    : "UPDATE_DECISION=" + automatedDecision);
             Console.CancelKeyPress += (sender, eventArgs) =>
             {
                 eventArgs.Cancel = true;
