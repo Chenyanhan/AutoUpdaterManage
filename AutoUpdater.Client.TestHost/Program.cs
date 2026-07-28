@@ -1,4 +1,5 @@
 using AutoUpdater.Client;
+using MySqlConnector;
 
 var installationDirectory = AppContext.BaseDirectory;
 var versionFile = Path.Combine(installationDirectory, "version.txt");
@@ -16,8 +17,39 @@ var listenPort = args.Length > 2 && int.TryParse(args[2], out var parsedPort)
 var restartExecutable = Path.GetFileName(Environment.ProcessPath);
 var automatedDecision = Environment.GetEnvironmentVariable(
     "AUTOUPDATER_TEST_DECISION");
-var databaseConnectionString = Environment.GetEnvironmentVariable(
+var environmentDatabaseConnection = Environment.GetEnvironmentVariable(
     "AUTOUPDATER_TEST_DATABASE");
+string? databaseConnectionString;
+string databaseConfigurationMessage;
+if (!string.IsNullOrWhiteSpace(environmentDatabaseConnection))
+{
+    var builder = new MySqlConnectionStringBuilder(
+        environmentDatabaseConnection);
+    var test = await ClientDatabaseSettingsStore.TestAsync(
+        builder.ConnectionString);
+    if (!test.Success)
+    {
+        Console.Error.WriteLine(test.Message);
+        return 3;
+    }
+    await ClientDatabaseSettingsStore.SaveAsync(
+        installationDirectory, builder);
+    databaseConnectionString = builder.ConnectionString;
+    databaseConfigurationMessage =
+        $"数据库同步：连接测试成功，密码已加密保存到 " +
+        ClientDatabaseSettingsStore.GetDefaultPath(installationDirectory);
+}
+else
+{
+    databaseConnectionString =
+        ClientDatabaseSettingsStore.TryLoadConnectionString(
+            installationDirectory,
+            out databaseConfigurationMessage);
+    databaseConfigurationMessage =
+        databaseConnectionString is null
+            ? $"数据库同步：{databaseConfigurationMessage}"
+            : $"数据库同步：{databaseConfigurationMessage}";
+}
 
 if (string.IsNullOrWhiteSpace(restartExecutable))
 {
@@ -70,10 +102,7 @@ Console.WriteLine($"测试设备：{deviceId}");
 Console.WriteLine($"当前版本：{currentVersion}");
 Console.WriteLine($"安装目录：{installationDirectory}");
 Console.WriteLine($"更新器：{updaterPath}");
-Console.WriteLine(
-    string.IsNullOrWhiteSpace(databaseConnectionString)
-        ? "数据库同步：未配置（设置 AUTOUPDATER_TEST_DATABASE）"
-        : "数据库同步：已配置MySQL连接");
+Console.WriteLine(databaseConfigurationMessage);
 Console.WriteLine($"正在监听 UDP {listenPort}。输入 exit 或按 Ctrl+C 可手动退出。");
 
 Console.CancelKeyPress += (_, eventArgs) =>
