@@ -384,15 +384,8 @@ namespace AutoUpdater.Client.Net462
                 if (UpdateDecisionRequired != null)
                     result = UpdateDecisionRequired(context);
                 else
-                    result = MessageBox.Show(
-                        "收到软件更新任务：\r\n" +
-                        context.UpdatePath +
-                        "\r\n\r\n是否立即更新？",
-                        "软件更新",
-                        MessageBoxButtons.YesNo,
-                        MessageBoxIcon.Question) == DialogResult.Yes
-                        ? UpdateDecision.InstallNow
-                        : UpdateDecision.Postpone;
+                    result = DesktopUpdatePrompt.ShowUpdate(
+                        context, _options.DeviceName);
             });
             return result;
         }
@@ -406,14 +399,8 @@ namespace AutoUpdater.Client.Net462
                 if (RollbackDecisionRequired != null)
                     result = RollbackDecisionRequired(context);
                 else
-                    result = MessageBox.Show(
-                        "是否回退到版本：" +
-                        (context.TargetVersion ?? "最近备份") + "？",
-                        "版本回退",
-                        MessageBoxButtons.YesNo,
-                        MessageBoxIcon.Warning) == DialogResult.Yes
-                        ? UpdateDecision.InstallNow
-                        : UpdateDecision.Postpone;
+                    result = DesktopUpdatePrompt.ShowRollback(
+                        context, _options.DeviceName);
             });
             return result;
         }
