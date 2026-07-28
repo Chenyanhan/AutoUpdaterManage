@@ -1,0 +1,45 @@
+# Visual Studio and user-specific settings
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# .NET build output
+**/bin/
+**/obj/
+artifacts/
+.build-check/
+.dotnet-cli/
+
+# Test and coverage output
+TestResults/
+coverage/
+*.coverage
+*.trx
+
+# Local task databases and runtime state
+*.db
+*.db-shm
+*.db-wal
+.autoupdater/
+
+# Published update artifacts
+UpdateOutput/
+**/UpdateOutput/
+*.zip
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+~$*
+
+# IDEs
+.idea/
+.vscode/
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store

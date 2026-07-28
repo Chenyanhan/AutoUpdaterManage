@@ -1,0 +1,91 @@
+<Window x:Class="AutoUpdater.Updater.ProgressWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="软件更新" Width="620" Height="410"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="NoResize" ShowInTaskbar="True"
+        Background="#F3F6FA">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="70"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <Border Background="#15233C">
+            <Grid Margin="22,0">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <Border Width="38" Height="38" CornerRadius="9"
+                            Background="{StaticResource PrimaryBrush}">
+                        <TextBlock Text="AU" Foreground="White" FontWeight="Bold"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <StackPanel Margin="12,0,0,0" VerticalAlignment="Center">
+                        <TextBlock Text="软件更新程序" Foreground="White"
+                                   FontSize="18" FontWeight="SemiBold"/>
+                        <TextBlock x:Name="OperationText" Text="正在准备更新"
+                                   Foreground="#9DAAC0" FontSize="11"/>
+                    </StackPanel>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <Border Grid.Row="1" Background="White" CornerRadius="10"
+                Margin="20" Padding="24">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <TextBlock x:Name="StatusText" Text="正在初始化更新环境…"
+                           FontSize="18" FontWeight="SemiBold"
+                           Foreground="{StaticResource TextBrush}"/>
+                <TextBlock x:Name="DetailText" Grid.Row="1"
+                           Margin="0,7,0,0" Text="请勿关闭计算机"
+                           Foreground="{StaticResource SecondaryTextBrush}"/>
+
+                <Grid Grid.Row="2" Margin="0,22,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="52"/>
+                    </Grid.ColumnDefinitions>
+                    <ProgressBar x:Name="ProgressBar" Height="12"
+                                 VerticalAlignment="Center"
+                                 Minimum="0" Maximum="100" Value="0"/>
+                    <TextBlock x:Name="PercentageText" Text="0%"
+                               Grid.Column="1" HorizontalAlignment="Right"
+                               VerticalAlignment="Center" FontWeight="SemiBold"
+                               Foreground="{StaticResource SecondaryTextBrush}"/>
+                </Grid>
+
+                <Border Grid.Row="3" Background="#F7F9FC" CornerRadius="7"
+                        Margin="0,18,0,0" Padding="12">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto">
+                        <TextBlock x:Name="ActivityText" TextWrapping="Wrap"
+                                   Foreground="#596780" FontFamily="Consolas"
+                                   FontSize="11"/>
+                    </ScrollViewer>
+                </Border>
+
+                <Grid Grid.Row="4" Margin="0,16,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock x:Name="LogPathText" VerticalAlignment="Center"
+                               Margin="0,0,12,0"
+                               TextTrimming="CharacterEllipsis"
+                               ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}"
+                               Foreground="{StaticResource SecondaryTextBrush}"
+                               FontSize="11"/>
+                    <Button x:Name="CloseButton" Content="关闭" HorizontalAlignment="Right"
+                            Grid.Column="1" Visibility="Collapsed" Click="CloseButton_Click"
+                            Background="#E8EDF5" Foreground="{StaticResource TextBrush}"/>
+                </Grid>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>
