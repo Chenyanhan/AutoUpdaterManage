@@ -32,6 +32,7 @@ public partial class MainWindow : ThemedWindow
 
         _controllerService.DeviceDiscovered += ApplyDiscoveredDevice;
         _controllerService.UpdateStatusReceived += ApplyUpdateStatus;
+        _controllerService.TaskProgressReceived += ApplyTaskProgress;
         _taskHistoryStore.PersistenceError += _ =>
             Dispatcher.BeginInvoke(() =>
                 TaskStorageStatusText.Text = "任务记录暂时无法写入，但不影响设备操作");
@@ -103,6 +104,16 @@ public partial class MainWindow : ThemedWindow
 
     private async void RefreshTasks_Click(object sender, RoutedEventArgs e) =>
         await LoadTaskHistoryAsync();
+
+    private void TaskGrid_MouseDoubleClick(
+        object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (TaskGrid.SelectedItem is not UpdateTaskRecord task) return;
+        new TaskDetailWindow(task, _taskHistoryStore)
+        {
+            Owner = this
+        }.ShowDialog();
+    }
 
     private async Task LoadTaskHistoryAsync()
     {
@@ -188,6 +199,13 @@ public partial class MainWindow : ThemedWindow
                     {
                         task.RecordAttempt(attempt);
                         _ = _taskHistoryStore.SaveAsync(task);
+                        AddTaskEvent(
+                            task,
+                            attempt == 1 ? "Dispatch" : "Retry",
+                            null,
+                            attempt == 1
+                                ? "正在下发指令"
+                                : $"第 {attempt} 次重试发送");
                     });
                 if (!acknowledgement.Received)
                 {
@@ -202,6 +220,8 @@ public partial class MainWindow : ThemedWindow
                         UpdateTaskState.Sent, "设备已收到指令，等待用户确认");
                     _ = _taskHistoryStore.SaveAsync(task);
                     device.UpdateResult = "设备已收到指令，等待用户确认";
+                    AddTaskEvent(
+                        task, "Delivered", null, device.UpdateResult);
                 }
             }
             catch (Exception ex)
@@ -256,6 +276,13 @@ public partial class MainWindow : ThemedWindow
                     {
                         task.RecordAttempt(attempt);
                         _ = _taskHistoryStore.SaveAsync(task);
+                        AddTaskEvent(
+                            task,
+                            attempt == 1 ? "Dispatch" : "Retry",
+                            null,
+                            attempt == 1
+                                ? "正在下发指令"
+                                : $"第 {attempt} 次重试发送");
                     });
                 if (!acknowledgement.Received)
                 {
@@ -270,6 +297,8 @@ public partial class MainWindow : ThemedWindow
                         UpdateTaskState.Sent, "设备已收到指令，等待用户确认");
                     _ = _taskHistoryStore.SaveAsync(task);
                     device.UpdateResult = "设备已收到指令，等待用户确认";
+                    AddTaskEvent(
+                        task, "Delivered", null, device.UpdateResult);
                 }
             }
             catch (Exception ex)
@@ -322,6 +351,15 @@ public partial class MainWindow : ThemedWindow
                         : UpdateTaskState.Postponed;
                 task.ApplyStatus(state, status.Message, status.CurrentVersion);
                 _ = _taskHistoryStore.SaveAsync(task);
+                AddTaskEvent(
+                    task,
+                    status.IsFinal ? (status.Success ? "Completed" : "Failed")
+                        : status.Success ? "Accepted" : "Postponed",
+                    status.IsFinal && status.Success ? 100 : null,
+                    status.Message,
+                    status.CurrentVersion is null
+                        ? null
+                        : $"当前版本：{status.CurrentVersion}");
                 _taskView.Refresh();
                 UpdateTaskSummary();
             }
@@ -335,6 +373,29 @@ public partial class MainWindow : ThemedWindow
                 if (status.Success && !string.IsNullOrWhiteSpace(status.CurrentVersion))
                     device.SetCurrentVersion(status.CurrentVersion);
             }
+        });
+    }
+
+    private void ApplyTaskProgress(TaskProgressInfo progress)
+    {
+        Dispatcher.Invoke(() =>
+        {
+            var task = Tasks.FirstOrDefault(
+                item => item.RequestId == progress.RequestId);
+            if (task is null) return;
+            task.ApplyStatus(
+                task.State,
+                $"{progress.Percentage}% {progress.Message}",
+                updatedAt: progress.OccurredAt.LocalDateTime);
+            _ = _taskHistoryStore.SaveAsync(task);
+            AddTaskEvent(
+                task,
+                progress.Stage,
+                progress.Percentage,
+                progress.Message,
+                progress.Detail,
+                progress.OccurredAt.LocalDateTime);
+            _taskView.Refresh();
         });
     }
 
@@ -367,8 +428,27 @@ public partial class MainWindow : ThemedWindow
     {
         Tasks.Insert(0, task);
         _ = _taskHistoryStore.SaveAsync(task);
+        AddTaskEvent(task, "Created", null, task.Message);
         _taskView.Refresh();
         UpdateTaskSummary();
+    }
+
+    private void AddTaskEvent(
+        UpdateTaskRecord task,
+        string stage,
+        int? percentage,
+        string message,
+        string? detail = null,
+        DateTime? occurredAt = null)
+    {
+        _ = _taskHistoryStore.AddEventAsync(new TaskEventRecord(
+            0,
+            task.RequestId,
+            stage,
+            percentage,
+            message,
+            detail,
+            occurredAt ?? DateTime.Now));
     }
 
     private void UpdateTaskSummary()

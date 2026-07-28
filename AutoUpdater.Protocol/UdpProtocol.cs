@@ -82,6 +82,7 @@ public enum UdpCommand : byte
     CancelTask = 0x13,
     RollbackRequest = 0x14,
     TaskReceived = 0x15,
+    TaskProgress = 0x16,
     Heartbeat = 0x20,
     StatusQuery = 0x21,
     StatusResponse = 0x22
@@ -104,6 +105,14 @@ public sealed record CancelTaskPayload(
 public sealed record UpdateAcceptedPayload(string DeviceId, bool Accepted, string Message);
 
 public sealed record TaskReceivedPayload(string DeviceId);
+
+public sealed record TaskProgressPayload(
+    string DeviceId,
+    string Stage,
+    int Percentage,
+    string Message,
+    string? Detail,
+    DateTimeOffset OccurredAt);
 
 public sealed record UpdateResultPayload(
     string DeviceId, bool Success, string Message, string? CurrentVersion = null);

@@ -137,6 +137,98 @@ public sealed class TaskHistoryStore : IDisposable
         }
     }
 
+    public async Task AddEventAsync(
+        TaskEventRecord taskEvent,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await _gate.WaitAsync(cancellationToken);
+            try
+            {
+                await EnsureInitializedCoreAsync(cancellationToken);
+                await using var connection = await OpenAsync(cancellationToken);
+                await using var command = connection.CreateCommand();
+                command.CommandText =
+                    """
+                    INSERT INTO task_events (
+                        request_id, stage, percentage, message, detail, occurred_at)
+                    VALUES (
+                        $request_id, $stage, $percentage, $message, $detail, $occurred_at);
+                    """;
+                command.Parameters.AddWithValue(
+                    "$request_id", taskEvent.RequestId.ToString("D"));
+                command.Parameters.AddWithValue("$stage", taskEvent.Stage);
+                command.Parameters.AddWithValue(
+                    "$percentage", (object?)taskEvent.Percentage ?? DBNull.Value);
+                command.Parameters.AddWithValue("$message", taskEvent.Message);
+                command.Parameters.AddWithValue(
+                    "$detail", (object?)taskEvent.Detail ?? DBNull.Value);
+                command.Parameters.AddWithValue(
+                    "$occurred_at", taskEvent.OccurredAt.ToString("O"));
+                await command.ExecuteNonQueryAsync(cancellationToken);
+            }
+            finally
+            {
+                _gate.Release();
+            }
+        }
+        catch (Exception ex)
+        {
+            PersistenceError?.Invoke(ex);
+        }
+    }
+
+    public async Task<IReadOnlyList<TaskEventRecord>> LoadEventsAsync(
+        Guid requestId,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await _gate.WaitAsync(cancellationToken);
+            try
+            {
+                await EnsureInitializedCoreAsync(cancellationToken);
+                await using var connection = await OpenAsync(cancellationToken);
+                await using var command = connection.CreateCommand();
+                command.CommandText =
+                    """
+                    SELECT id, request_id, stage, percentage,
+                           message, detail, occurred_at
+                    FROM task_events
+                    WHERE request_id = $request_id
+                    ORDER BY occurred_at, id;
+                    """;
+                command.Parameters.AddWithValue(
+                    "$request_id", requestId.ToString("D"));
+                var result = new List<TaskEventRecord>();
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    result.Add(new TaskEventRecord(
+                        reader.GetInt64(0),
+                        Guid.Parse(reader.GetString(1)),
+                        reader.GetString(2),
+                        reader.IsDBNull(3) ? null : reader.GetInt32(3),
+                        reader.GetString(4),
+                        GetNullableString(reader, 5),
+                        DateTime.Parse(reader.GetString(6), null,
+                            System.Globalization.DateTimeStyles.RoundtripKind)));
+                }
+                return result;
+            }
+            finally
+            {
+                _gate.Release();
+            }
+        }
+        catch (Exception ex)
+        {
+            PersistenceError?.Invoke(ex);
+            return [];
+        }
+    }
+
     private async Task EnsureInitializedCoreAsync(CancellationToken cancellationToken)
     {
         if (_initialized) return;
@@ -167,6 +259,17 @@ public sealed class TaskHistoryStore : IDisposable
                 ON update_tasks(created_at DESC);
             CREATE INDEX IF NOT EXISTS ix_update_tasks_device_id
                 ON update_tasks(device_id);
+            CREATE TABLE IF NOT EXISTS task_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                request_id TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                percentage INTEGER NULL,
+                message TEXT NOT NULL,
+                detail TEXT NULL,
+                occurred_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS ix_task_events_request_id
+                ON task_events(request_id, occurred_at);
             """;
         await command.ExecuteNonQueryAsync(cancellationToken);
         await EnsureColumnAsync(

@@ -307,7 +307,8 @@
                     </Border>
 
                     <Border Grid.Row="2" Background="White" CornerRadius="9">
-                        <dxg:GridControl x:Name="TaskGrid" ItemsSource="{Binding Tasks}">
+                        <dxg:GridControl x:Name="TaskGrid" ItemsSource="{Binding Tasks}"
+                                         MouseDoubleClick="TaskGrid_MouseDoubleClick">
                             <dxg:GridControl.View>
                                 <dxg:TableView ShowGroupPanel="False"
                                                ShowSearchPanelMode="Never"

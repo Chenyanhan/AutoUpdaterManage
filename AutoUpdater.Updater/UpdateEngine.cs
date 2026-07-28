@@ -600,8 +600,12 @@ internal sealed class UpdateEngine(
     }
 
     private void Report(
-        UpdateStage stage, int percentage, string message, string? detail = null) =>
-        progress?.Report(new UpdateProgress(stage, percentage, message, detail));
+        UpdateStage stage, int percentage, string message, string? detail = null)
+    {
+        var update = new UpdateProgress(stage, percentage, message, detail);
+        progress?.Report(update);
+        reporter.ReportProgress(update);
+    }
 
     private static string FormatBytes(long bytes) => bytes switch
     {

@@ -20,6 +20,14 @@ public sealed record DispatchAcknowledgement(
     bool Accepted,
     string Message,
     int Attempts);
+public sealed record TaskProgressInfo(
+    Guid RequestId,
+    string DeviceId,
+    string Stage,
+    int Percentage,
+    string Message,
+    string? Detail,
+    DateTimeOffset OccurredAt);
 
 public sealed class UdpControllerService : IDisposable
 {
@@ -32,6 +40,7 @@ public sealed class UdpControllerService : IDisposable
 
     public event Action<DiscoveredDevice>? DeviceDiscovered;
     public event Action<UpdateStatusInfo>? UpdateStatusReceived;
+    public event Action<TaskProgressInfo>? TaskProgressReceived;
 
     public Task StartAsync()
     {
@@ -249,6 +258,18 @@ public sealed class UdpControllerService : IDisposable
                             _pendingAcknowledgements.TryGetValue(
                                 packet.RequestId, out var pending))
                             pending.TrySetResult(receipt);
+                        break;
+                    case UdpCommand.TaskProgress:
+                        var progress = UdpProtocol.DecodePayload<TaskProgressPayload>(packet);
+                        if (progress is not null)
+                            TaskProgressReceived?.Invoke(new TaskProgressInfo(
+                                packet.RequestId,
+                                progress.DeviceId,
+                                progress.Stage,
+                                progress.Percentage,
+                                progress.Message,
+                                progress.Detail,
+                                progress.OccurredAt));
                         break;
                     case UdpCommand.UpdateResult:
                         var result = UdpProtocol.DecodePayload<UpdateResultPayload>(packet);
