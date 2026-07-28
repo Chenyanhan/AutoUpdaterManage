@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.IO;
+using System.Xml.Linq;
 using MySqlConnector;
 
 namespace AutoUpdater.Client;
@@ -34,6 +35,78 @@ public static class ClientDatabaseSettingsStore
             Path.GetFullPath(installationDirectory),
             "AutoUpdater",
             "client-settings.json");
+
+    public static string? TryLoadFromApplicationConfig(
+        string installationDirectory,
+        string? applicationExecutable,
+        out string message)
+    {
+        var directory = Path.GetFullPath(installationDirectory);
+        var candidates = new List<string>();
+        if (!string.IsNullOrWhiteSpace(applicationExecutable))
+        {
+            var executablePath = Path.IsPathRooted(applicationExecutable)
+                ? applicationExecutable
+                : Path.Combine(directory, applicationExecutable);
+            candidates.Add(Path.GetFullPath(executablePath) + ".config");
+        }
+        if (!string.IsNullOrWhiteSpace(Environment.ProcessPath))
+            candidates.Add(Path.GetFullPath(Environment.ProcessPath) + ".config");
+        if (Directory.Exists(directory))
+            candidates.AddRange(
+                Directory.EnumerateFiles(
+                    directory, "*.exe.config", SearchOption.TopDirectoryOnly));
+
+        foreach (var path in candidates.Distinct(
+                     StringComparer.OrdinalIgnoreCase))
+        {
+            if (!File.Exists(path)) continue;
+            try
+            {
+                var document = XDocument.Load(
+                    path, LoadOptions.None);
+                var values = document
+                    .Descendants()
+                    .Where(element =>
+                        element.Name.LocalName.Equals(
+                            "add", StringComparison.OrdinalIgnoreCase))
+                    .SelectMany(element => new[]
+                    {
+                        element.Attribute("connectionString")?.Value,
+                        element.Attribute("value")?.Value
+                    })
+                    .Where(value => !string.IsNullOrWhiteSpace(value));
+                foreach (var value in values)
+                {
+                    try
+                    {
+                        var builder =
+                            new MySqlConnectionStringBuilder(value!);
+                        if (string.IsNullOrWhiteSpace(builder.Server) ||
+                            string.IsNullOrWhiteSpace(builder.Database) ||
+                            string.IsNullOrWhiteSpace(builder.UserID))
+                            continue;
+                        builder.ConnectionTimeout = 10;
+                        builder.DefaultCommandTimeout = 30;
+                        builder.Pooling = true;
+                        message = $"已读取上位机配置：{path}";
+                        return builder.ConnectionString;
+                    }
+                    catch (ArgumentException)
+                    {
+                        // 该配置项不是MySQL连接串，继续检查其他项。
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                message = $"上位机配置无法读取：{path}：{ex.Message}";
+                return null;
+            }
+        }
+        message = "未在上位机 .config 中找到标准MySQL连接串。";
+        return null;
+    }
 
     public static async Task SaveAsync(
         string installationDirectory,

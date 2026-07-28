@@ -42,9 +42,17 @@ if (!string.IsNullOrWhiteSpace(environmentDatabaseConnection))
 else
 {
     databaseConnectionString =
-        ClientDatabaseSettingsStore.TryLoadConnectionString(
+        ClientDatabaseSettingsStore.TryLoadFromApplicationConfig(
             installationDirectory,
+            restartExecutable,
             out databaseConfigurationMessage);
+    if (databaseConnectionString is null)
+    {
+        databaseConnectionString =
+            ClientDatabaseSettingsStore.TryLoadConnectionString(
+                installationDirectory,
+                out databaseConfigurationMessage);
+    }
     databaseConfigurationMessage =
         databaseConnectionString is null
             ? $"数据库同步：{databaseConfigurationMessage}"

@@ -15,6 +15,7 @@ public sealed class EmbeddedUpdateClient : IDisposable
 {
     public const int DefaultPort = 45678;
     private readonly EmbeddedClientOptions _options;
+    private readonly string? _databaseConnectionString;
     private readonly ProcessedRequestStore _processedRequests;
     private readonly ConcurrentDictionary<Guid, Lazy<Task<CommandOutcome>>> _inflightRequests = new();
     private readonly ConcurrentDictionary<Guid,
@@ -29,6 +30,15 @@ public sealed class EmbeddedUpdateClient : IDisposable
         var installationDirectory = Path.GetFullPath(
             options.InstallationDirectory ?? AppContext.BaseDirectory);
         _processedRequests = new ProcessedRequestStore(installationDirectory);
+        _databaseConnectionString = options.DatabaseConnectionString ??
+            ClientDatabaseSettingsStore.TryLoadFromApplicationConfig(
+                installationDirectory,
+                options.RestartExecutablePath ??
+                Path.GetFileName(Environment.ProcessPath),
+                out _) ??
+            ClientDatabaseSettingsStore.TryLoadConnectionString(
+                installationDirectory,
+                out _);
     }
 
     public event Func<UpdateCommandContext, Task<bool>>? UpdateConfirmationRequired;
@@ -431,14 +441,14 @@ public sealed class EmbeddedUpdateClient : IDisposable
         if (validationError is not null)
             return SaveDatabaseSyncResult(
                 requestId, false, validationError);
-        if (string.IsNullOrWhiteSpace(_options.DatabaseConnectionString))
+        if (string.IsNullOrWhiteSpace(_databaseConnectionString))
             return SaveDatabaseSyncResult(
                 requestId, false, "客户端尚未配置MySQL连接。");
 
         try
         {
             var affectedRows = await DatabaseSyncExecutor.ExecuteAsync(
-                _options.DatabaseConnectionString,
+                _databaseConnectionString,
                 request,
                 _cancellation?.Token ?? CancellationToken.None);
             return SaveDatabaseSyncResult(
