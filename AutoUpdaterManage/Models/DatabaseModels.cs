@@ -12,7 +12,8 @@ public sealed record DatabaseColumnInfo(
     string DataType,
     bool IsNullable,
     bool IsPrimaryKey,
-    object? DefaultValue);
+    object? DefaultValue,
+    bool IsAutoIncrement = false);
 
 public sealed record DatabasePage(
     DataTable Data,
@@ -30,9 +31,14 @@ public sealed class DatabaseChangeDraft
     public required string TableName { get; init; }
     public required string Operation { get; init; }
     public required IReadOnlyDictionary<string, object?> Values { get; init; }
+    public IReadOnlyDictionary<string, object?> KeyValues { get; init; } =
+        new Dictionary<string, object?>();
     public required DateTime CreatedAt { get; init; }
 
     public string Summary =>
         $"{Operation} {TableName} · " +
-        string.Join(", ", Values.Take(3).Select(pair => $"{pair.Key}={pair.Value}"));
+        string.Join(", ", Values.Select(pair => $"{pair.Key}={FormatValue(pair.Value)}"));
+
+    private static string FormatValue(object? value) =>
+        value is null or DBNull ? "NULL" : Convert.ToString(value) ?? string.Empty;
 }

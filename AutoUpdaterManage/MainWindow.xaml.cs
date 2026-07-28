@@ -1,11 +1,14 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Data;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
 using DevExpress.Xpf.Core;
 using AutoUpdaterManage.Models;
 using AutoUpdaterManage.Services;
+using AutoUpdater.Protocol;
 using MessageBox = System.Windows.MessageBox;
 using OpenFileDialog = Microsoft.Win32.OpenFileDialog;
 
@@ -15,8 +18,8 @@ public partial class MainWindow : ThemedWindow
 {
     private readonly UdpControllerService _controllerService = new();
     private readonly TaskHistoryStore _taskHistoryStore = new();
-    private readonly IDatabaseProvider _databaseProvider =
-        new SqliteDatabaseProvider();
+    private IDatabaseProvider _databaseProvider =
+        new MySqlDatabaseProvider(["data_result", "plc_user_manage"]);
     private readonly ICollectionView _deviceView;
     private readonly ICollectionView _taskView;
     private System.Net.IPAddress? _broadcastAddress;
@@ -24,9 +27,11 @@ public partial class MainWindow : ThemedWindow
     private int _databasePageNumber = 1;
     private const int DatabasePageSize = 100;
     private DatabasePage? _databasePage;
+    private readonly Dictionary<Guid, DatabaseSyncBatch> _databaseSyncBatches = [];
 
     public ObservableCollection<DeviceInfo> Devices { get; } = [];
     public ObservableCollection<UpdateTaskRecord> Tasks { get; } = [];
+    public ObservableCollection<UpdateTaskRecord> DatabaseSyncTasks { get; } = [];
     public ObservableCollection<DatabaseChangeDraft> DatabaseDrafts { get; } = [];
 
     public MainWindow()
@@ -41,6 +46,7 @@ public partial class MainWindow : ThemedWindow
         _controllerService.DeviceDiscovered += ApplyDiscoveredDevice;
         _controllerService.UpdateStatusReceived += ApplyUpdateStatus;
         _controllerService.TaskProgressReceived += ApplyTaskProgress;
+        _controllerService.DatabaseSyncStatusReceived += ApplyDatabaseSyncStatus;
         _taskHistoryStore.PersistenceError += _ =>
             Dispatcher.BeginInvoke(() =>
                 TaskStorageStatusText.Text = "任务记录暂时无法写入，但不影响设备操作");
@@ -128,8 +134,13 @@ public partial class MainWindow : ThemedWindow
     {
         var records = await _taskHistoryStore.LoadAsync();
         Tasks.Clear();
+        DatabaseSyncTasks.Clear();
         foreach (var record in records)
+        {
             Tasks.Add(record);
+            if (record.Operation == UpdateTaskOperation.DatabaseSync)
+                DatabaseSyncTasks.Add(record);
+        }
         _taskView.Refresh();
         UpdateTaskSummary();
         TaskStorageStatusText.Text =
@@ -250,30 +261,55 @@ public partial class MainWindow : ThemedWindow
             UpdatePathBox.Text = window.GeneratedManifestPath;
     }
 
-    private void BrowseDatabase_Click(object sender, RoutedEventArgs e)
-    {
-        var dialog = new OpenFileDialog
-        {
-            Title = "选择SQLite数据库",
-            Filter = "SQLite数据库 (*.db;*.sqlite;*.sqlite3)|*.db;*.sqlite;*.sqlite3|所有文件 (*.*)|*.*",
-            CheckFileExists = true
-        };
-        if (dialog.ShowDialog(this) == true)
-            DatabasePathBox.Text = dialog.FileName;
-    }
-
     private async void ConnectDatabase_Click(object sender, RoutedEventArgs e)
     {
         try
         {
-            DatabaseStatusText.Text = "正在连接SQLite数据库…";
-            await _databaseProvider.ConnectAsync(DatabasePathBox.Text.Trim());
+            var selectedProvider =
+                (DatabaseProviderBox.SelectedItem as ComboBoxItem)?.Content?.ToString();
+            await _databaseProvider.DisposeAsync();
+            string connectionValue;
+            if (selectedProvider == "SQLite")
+            {
+                var dialog = new OpenFileDialog
+                {
+                    Title = "选择SQLite数据库",
+                    Filter = "SQLite数据库 (*.db;*.sqlite;*.sqlite3)|*.db;*.sqlite;*.sqlite3|所有文件 (*.*)|*.*",
+                    CheckFileExists = true
+                };
+                if (dialog.ShowDialog(this) != true) return;
+                _databaseProvider = new SqliteDatabaseProvider();
+                connectionValue = dialog.FileName;
+                DatabaseStatusText.Text = "正在连接SQLite数据库…";
+            }
+            else
+            {
+                if (!uint.TryParse(DatabasePortBox.Text.Trim(), out var port) ||
+                    port is 0 or > 65535)
+                    throw new FormatException("MySQL端口必须在1到65535之间。");
+                _databaseProvider = new MySqlDatabaseProvider(
+                    ["data_result", "plc_user_manage"]);
+                connectionValue = new MySqlConnector.MySqlConnectionStringBuilder
+                {
+                    Server = DatabaseHostBox.Text.Trim(),
+                    Port = port,
+                    UserID = DatabaseUserBox.Text.Trim(),
+                    Password = DatabasePasswordBox.Password,
+                    Database = DatabaseNameBox.Text.Trim(),
+                    // 当前用于可信内网中的 MySQL。跨公网部署时应改为
+                    // VerifyCA/VerifyFull，并配置服务器证书。
+                    SslMode = MySqlConnector.MySqlSslMode.None
+                }.ConnectionString;
+                DatabaseStatusText.Text = "正在连接MySQL数据库…";
+            }
+            await _databaseProvider.ConnectAsync(connectionValue);
             var tables = await _databaseProvider.GetTablesAsync();
             DatabaseTablesList.ItemsSource = tables;
             DatabaseConnectionText.Text =
-                $"SQLite · {tables.Count} 张表";
+                $"{_databaseProvider.ProviderName} · {tables.Count} 张表";
             DatabaseStatusText.Text =
-                $"连接成功：{DatabasePathBox.Text.Trim()}";
+                $"连接成功：{_databaseProvider.ProviderName} / " +
+                $"{DatabaseNameBox.Text.Trim()}";
             _currentDatabaseTable = null;
             DatabaseDataGrid.ItemsSource = null;
             CurrentTableText.Text = "请选择数据表";
@@ -381,6 +417,119 @@ public partial class MainWindow : ThemedWindow
         }
     }
 
+    private async void EditDatabaseDraft_Click(
+        object sender, RoutedEventArgs e)
+    {
+        if (_currentDatabaseTable is null ||
+            DatabaseDataGrid.SelectedItem is not DataRowView row)
+        {
+            MessageBox.Show(
+                "请先选择需要编辑的数据行。",
+                "尚未选择数据",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return;
+        }
+        try
+        {
+            var columns = await _databaseProvider.GetColumnsAsync(
+                _currentDatabaseTable.Name);
+            if (!columns.Any(column => column.IsPrimaryKey))
+                throw new InvalidOperationException("该表没有主键，不能安全编辑。");
+            var values = RowToDictionary(row);
+            var window = new DatabaseRowDraftWindow(
+                _currentDatabaseTable.Name,
+                columns,
+                "UPDATE",
+                values)
+            {
+                Owner = this
+            };
+            if (window.ShowDialog() == true && window.Draft is not null)
+            {
+                DatabaseDrafts.Add(window.Draft);
+                DatabaseStatusText.Text =
+                    $"已添加编辑草稿，待同步变更共 {DatabaseDrafts.Count} 条";
+            }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                ex.Message,
+                "无法创建编辑草稿",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+        }
+    }
+
+    private async void DeleteDatabaseDraft_Click(
+        object sender, RoutedEventArgs e)
+    {
+        if (_currentDatabaseTable is null ||
+            DatabaseDataGrid.SelectedItem is not DataRowView row)
+        {
+            MessageBox.Show(
+                "请先选择需要删除的数据行。",
+                "尚未选择数据",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return;
+        }
+        try
+        {
+            var columns = await _databaseProvider.GetColumnsAsync(
+                _currentDatabaseTable.Name);
+            var primaryKeys = columns
+                .Where(column => column.IsPrimaryKey)
+                .ToArray();
+            if (primaryKeys.Length == 0)
+                throw new InvalidOperationException("该表没有主键，不能安全删除。");
+            var values = RowToDictionary(row);
+            var keyValues = primaryKeys.ToDictionary(
+                column => column.Name,
+                column => values.GetValueOrDefault(column.Name));
+            if (MessageBox.Show(
+                    $"确认把 {_currentDatabaseTable.Name} 的选中行加入删除草稿？\n" +
+                    string.Join(", ", keyValues.Select(
+                        pair => $"{pair.Key}={pair.Value}")),
+                    "确认删除草稿",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Warning) != MessageBoxResult.Yes)
+                return;
+            DatabaseDrafts.Add(new DatabaseChangeDraft
+            {
+                Id = Guid.NewGuid(),
+                TableName = _currentDatabaseTable.Name,
+                Operation = "DELETE",
+                Values = values,
+                KeyValues = keyValues,
+                CreatedAt = DateTime.Now
+            });
+            DatabaseStatusText.Text =
+                $"已添加删除草稿，待同步变更共 {DatabaseDrafts.Count} 条";
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                ex.Message,
+                "无法创建删除草稿",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+        }
+    }
+
+    private static IReadOnlyDictionary<string, object?> RowToDictionary(
+        DataRowView row)
+    {
+        var table = row.DataView.Table ??
+            throw new InvalidOperationException("无法读取当前数据行。");
+        return table.Columns.Cast<DataColumn>().ToDictionary(
+            column => column.ColumnName,
+            column => row[column.ColumnName] is DBNull
+                ? null
+                : row[column.ColumnName]);
+    }
+
     private void RemoveDatabaseDraft_Click(
         object sender, RoutedEventArgs e)
     {
@@ -389,6 +538,305 @@ public partial class MainWindow : ThemedWindow
         DatabaseDrafts.Remove(draft);
         DatabaseStatusText.Text =
             $"待同步变更共 {DatabaseDrafts.Count} 条";
+    }
+
+    private async void ApplyDatabaseDrafts_Click(
+        object sender, RoutedEventArgs e)
+    {
+        if (!_databaseProvider.IsConnected)
+        {
+            MessageBox.Show(
+                "请先连接数据库。",
+                "数据库尚未连接",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return;
+        }
+        if (DatabaseDrafts.Count == 0)
+        {
+            MessageBox.Show(
+                "当前没有待应用的数据库变更。",
+                "没有变更",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return;
+        }
+
+        var changes = DatabaseDrafts.ToArray();
+        var summary = string.Join(
+            "\n",
+            changes.GroupBy(change => change.Operation)
+                .Select(group => $"{group.Key}：{group.Count()} 条"));
+        if (MessageBox.Show(
+                $"即将在本机数据库执行 {changes.Length} 条变更：\n\n" +
+                $"{summary}\n\n所有变更将在同一个事务中执行，是否继续？",
+                "确认应用数据库变更",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning) != MessageBoxResult.Yes)
+            return;
+
+        ApplyDatabaseDraftsButton.IsEnabled = false;
+        ApplyDatabaseDraftsButton.Content = "正在应用…";
+        DatabaseStatusText.Text = "正在事务中应用数据库变更…";
+        try
+        {
+            var affectedRows =
+                await _databaseProvider.ApplyChangesAsync(changes);
+            DatabaseDrafts.Clear();
+            await LoadDatabasePageAsync();
+            DatabaseStatusText.Text =
+                $"应用成功：{changes.Length} 条变更，影响 {affectedRows} 行";
+            MessageBox.Show(
+                $"数据库变更已全部提交。\n影响行数：{affectedRows}",
+                "应用成功",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+        }
+        catch (Exception ex)
+        {
+            DatabaseStatusText.Text =
+                $"应用失败，事务已回滚：{ex.Message}";
+            MessageBox.Show(
+                $"所有变更均未提交，事务已经回滚。\n\n{ex.Message}",
+                "应用数据库变更失败",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+        }
+        finally
+        {
+            ApplyDatabaseDraftsButton.Content = "应用到本机";
+            ApplyDatabaseDraftsButton.IsEnabled = true;
+        }
+    }
+
+    private async void SyncDatabaseDrafts_Click(
+        object sender, RoutedEventArgs e)
+    {
+        var selectedDevices = Devices
+            .Where(device => device.IsSelected &&
+                             device.Status == DeviceStatus.Online)
+            .ToArray();
+        if (selectedDevices.Length == 0)
+        {
+            MessageBox.Show(
+                "请先在设备管理页面选择至少一台在线设备。",
+                "未选择设备",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return;
+        }
+        if (DatabaseDrafts.Count == 0)
+        {
+            MessageBox.Show(
+                "当前没有待同步的数据库变更。",
+                "没有变更",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return;
+        }
+
+        var changes = DatabaseDrafts.Select(change =>
+            new DatabaseChangePayload(
+                change.Id,
+                change.TableName,
+                change.Operation,
+                change.Values.ToDictionary(
+                    pair => pair.Key,
+                    pair => JsonSerializer.SerializeToElement(pair.Value)),
+                change.KeyValues.ToDictionary(
+                    pair => pair.Key,
+                    pair => JsonSerializer.SerializeToElement(pair.Value))))
+            .ToArray();
+        var databaseName = string.IsNullOrWhiteSpace(DatabaseNameBox.Text)
+            ? "leadchina_project"
+            : DatabaseNameBox.Text.Trim();
+        if (MessageBox.Show(
+                $"将向 {selectedDevices.Length} 台设备下发 " +
+                $"{changes.Length} 条数据库变更。\n\n" +
+                "客户端将立即在事务中写入目标MySQL数据库；任意一条失败时整批回滚。是否继续？",
+                "确认同步数据库变更",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Information) != MessageBoxResult.Yes)
+            return;
+
+        SyncDatabaseDraftsButton.IsEnabled = false;
+        SyncDatabaseDraftsButton.Content = "正在同步…";
+        var batch = new DatabaseSyncBatch(
+            changes.Select(change => change.ChangeId).ToHashSet(),
+            selectedDevices.Select(device => device.DeviceId)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase));
+        try
+        {
+            foreach (var device in selectedDevices)
+            {
+                var requestId = Guid.NewGuid();
+                _databaseSyncBatches[requestId] = batch;
+                var task = new UpdateTaskRecord(
+                    requestId,
+                    device.DeviceId,
+                    device.Name,
+                    device.IpAddress,
+                    UpdateTaskOperation.DatabaseSync,
+                    databaseName,
+                    null,
+                    $"{changes.Length} 条变更",
+                    UpdateTaskState.Dispatching,
+                    "准备下发数据库同步任务",
+                    DateTime.Now,
+                    DateTime.Now);
+                Tasks.Insert(0, task);
+                DatabaseSyncTasks.Insert(0, task);
+                _ = _taskHistoryStore.SaveAsync(task);
+                try
+                {
+                    device.UpdateResult = "正在下发数据库变更…";
+                    var acknowledgement =
+                        await _controllerService.SendDatabaseSyncReliableAsync(
+                            device.IpAddress,
+                            device.UdpPort,
+                            device.DeviceId,
+                            databaseName,
+                            changes,
+                            requestId,
+                            attempt =>
+                            {
+                                Dispatcher.Invoke(() =>
+                                {
+                                    task.RecordAttempt(attempt);
+                                    _ = _taskHistoryStore.SaveAsync(task);
+                                });
+                            });
+                    if (!acknowledgement.Received)
+                    {
+                        CompleteDatabaseSyncTarget(
+                            requestId,
+                            device.DeviceId,
+                            false,
+                            acknowledgement.Message);
+                    }
+                    else if (device.UpdateResult == "正在下发数据库变更…")
+                    {
+                        // 最终结果可能比可靠发送方法更早返回。
+                        device.UpdateResult =
+                            "设备已收到数据库同步任务，等待执行结果";
+                        if (task.State == UpdateTaskState.Dispatching)
+                        {
+                            task.ApplyStatus(
+                                UpdateTaskState.Sent,
+                                "设备已收到任务，等待执行结果");
+                            _ = _taskHistoryStore.SaveAsync(task);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    CompleteDatabaseSyncTarget(
+                        requestId,
+                        device.DeviceId,
+                        false,
+                        ex.Message);
+                }
+            }
+            DatabaseStatusText.Text =
+                $"已向 {selectedDevices.Length} 台设备下发数据库同步任务";
+        }
+        catch (Exception ex)
+        {
+            DatabaseStatusText.Text = $"数据库同步失败：{ex.Message}";
+            MessageBox.Show(
+                ex.Message,
+                "数据库同步失败",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+        }
+        finally
+        {
+            SyncDatabaseDraftsButton.Content = "同步到设备";
+            SyncDatabaseDraftsButton.IsEnabled = true;
+        }
+    }
+
+    private void ApplyDatabaseSyncStatus(DatabaseSyncStatusInfo status)
+    {
+        Dispatcher.Invoke(() =>
+        {
+            var device = Devices.FirstOrDefault(
+                item => string.Equals(
+                    item.DeviceId,
+                    status.DeviceId,
+                    StringComparison.OrdinalIgnoreCase));
+            if (device is not null)
+                device.UpdateResult = status.Success
+                    ? $"数据库同步成功：{status.AcceptedChanges} 条"
+                    : status.Message;
+            CompleteDatabaseSyncTarget(
+                status.RequestId,
+                status.DeviceId,
+                status.Success,
+                status.Message);
+        });
+    }
+
+    private void CompleteDatabaseSyncTarget(
+        Guid requestId,
+        string deviceId,
+        bool success,
+        string message)
+    {
+        if (!_databaseSyncBatches.TryGetValue(requestId, out var batch))
+            return;
+        var task = Tasks.FirstOrDefault(item => item.RequestId == requestId);
+        if (task is not null)
+        {
+            task.ApplyStatus(
+                success ? UpdateTaskState.Succeeded : UpdateTaskState.Failed,
+                message);
+            _ = _taskHistoryStore.SaveAsync(task);
+            _ = _taskHistoryStore.AddEventAsync(new TaskEventRecord(
+                0,
+                requestId,
+                success ? "DatabaseSyncSucceeded" : "DatabaseSyncFailed",
+                success ? 100 : null,
+                message,
+                null,
+                DateTime.Now));
+        }
+        batch.PendingDeviceIds.Remove(deviceId);
+        if (!success)
+        {
+            batch.Failed = true;
+            batch.Errors.Add($"{deviceId}：{message}");
+        }
+        if (batch.PendingDeviceIds.Count > 0)
+            return;
+
+        foreach (var key in _databaseSyncBatches
+                     .Where(pair => ReferenceEquals(pair.Value, batch))
+                     .Select(pair => pair.Key)
+                     .ToArray())
+            _databaseSyncBatches.Remove(key);
+        if (batch.Failed)
+        {
+            DatabaseStatusText.Text =
+                $"部分设备同步失败，草稿已保留：{string.Join("；", batch.Errors)}";
+            return;
+        }
+
+        foreach (var draft in DatabaseDrafts
+                     .Where(item => batch.DraftIds.Contains(item.Id))
+                     .ToArray())
+            DatabaseDrafts.Remove(draft);
+        DatabaseStatusText.Text =
+            "所有目标设备同步成功，已从待同步列表移除本批变更";
+        _ = RefreshDatabaseAfterSyncAsync();
+    }
+
+    private async Task RefreshDatabaseAfterSyncAsync()
+    {
+        await LoadDatabasePageAsync();
+        if (_currentDatabaseTable is not null)
+            DatabaseStatusText.Text =
+                $"同步成功，已刷新 {_currentDatabaseTable.Name} 数据";
     }
 
     private async void Rollback_Click(object sender, RoutedEventArgs e)
@@ -644,5 +1092,15 @@ public partial class MainWindow : ThemedWindow
         if (SummaryText is null) return;
         SummaryText.Text = $"共 {Devices.Count} 台 · 在线 {Devices.Count(d => d.Status == DeviceStatus.Online)} 台";
         UpdateSelection();
+    }
+
+    private sealed class DatabaseSyncBatch(
+        HashSet<Guid> draftIds,
+        HashSet<string> pendingDeviceIds)
+    {
+        public HashSet<Guid> DraftIds { get; } = draftIds;
+        public HashSet<string> PendingDeviceIds { get; } = pendingDeviceIds;
+        public bool Failed { get; set; }
+        public List<string> Errors { get; } = [];
     }
 }

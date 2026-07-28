@@ -6,7 +6,8 @@ namespace AutoUpdaterManage.Models;
 public enum UpdateTaskOperation
 {
     Update,
-    Rollback
+    Rollback,
+    DatabaseSync
 }
 
 public enum UpdateTaskState
@@ -69,9 +70,13 @@ public sealed class UpdateTaskRecord : INotifyPropertyChanged
     public string DeviceName { get; }
     public string IpAddress { get; }
     public UpdateTaskOperation Operation { get; }
-    public string OperationText => Operation == UpdateTaskOperation.Update
-        ? "软件更新"
-        : "版本回退";
+    public string OperationText => Operation switch
+    {
+        UpdateTaskOperation.Update => "软件更新",
+        UpdateTaskOperation.Rollback => "版本回退",
+        UpdateTaskOperation.DatabaseSync => "数据库同步",
+        _ => "未知"
+    };
     public string? Source { get; }
     public string? SourceVersion { get; }
     public string? TargetVersion { get; }

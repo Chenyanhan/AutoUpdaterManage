@@ -1,37 +1,41 @@
 using System.Data;
-using System.IO;
 using AutoUpdaterManage.Models;
-using Microsoft.Data.Sqlite;
+using MySqlConnector;
 
 namespace AutoUpdaterManage.Services;
 
-public sealed class SqliteDatabaseProvider : IDatabaseProvider
+public sealed class MySqlDatabaseProvider(
+    IReadOnlyCollection<string>? allowedTables = null) : IDatabaseProvider
 {
-    private SqliteConnection? _connection;
+    private readonly HashSet<string> _allowedTables = new(
+        allowedTables ?? [],
+        StringComparer.OrdinalIgnoreCase);
+    private MySqlConnection? _connection;
+    private string? _databaseName;
     private HashSet<string> _knownTables = new(StringComparer.OrdinalIgnoreCase);
 
-    public string ProviderName => "SQLite";
+    public string ProviderName => "MySQL";
     public bool IsConnected => _connection?.State == ConnectionState.Open;
 
     public async Task ConnectAsync(
         string connectionValue,
         CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrWhiteSpace(connectionValue))
-            throw new ArgumentException("请选择SQLite数据库文件。", nameof(connectionValue));
-        var databasePath = Path.GetFullPath(connectionValue);
-        if (!File.Exists(databasePath))
-            throw new FileNotFoundException("找不到SQLite数据库文件。", databasePath);
+        var builder = new MySqlConnectionStringBuilder(connectionValue)
+        {
+            CharacterSet = "utf8mb4",
+            ConnectionTimeout = 10,
+            DefaultCommandTimeout = 30,
+            Pooling = true
+        };
+        if (string.IsNullOrWhiteSpace(builder.Database))
+            throw new ArgumentException("请输入数据库名。", nameof(connectionValue));
 
         if (_connection is not null)
             await _connection.DisposeAsync();
-        _connection = new SqliteConnection(new SqliteConnectionStringBuilder
-        {
-            DataSource = databasePath,
-            Mode = SqliteOpenMode.ReadWrite,
-            Cache = SqliteCacheMode.Shared
-        }.ToString());
+        _connection = new MySqlConnection(builder.ConnectionString);
         await _connection.OpenAsync(cancellationToken);
+        _databaseName = builder.Database;
         _knownTables = (await GetTablesCoreAsync(cancellationToken))
             .Select(table => table.Name)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -41,10 +45,10 @@ public sealed class SqliteDatabaseProvider : IDatabaseProvider
         CancellationToken cancellationToken = default)
     {
         EnsureConnected();
-        var tables = await GetTablesCoreAsync(cancellationToken);
-        _knownTables = tables.Select(table => table.Name)
+        var result = await GetTablesCoreAsync(cancellationToken);
+        _knownTables = result.Select(table => table.Name)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        return tables;
+        return result;
     }
 
     private async Task<IReadOnlyList<DatabaseTableInfo>> GetTablesCoreAsync(
@@ -54,15 +58,20 @@ public sealed class SqliteDatabaseProvider : IDatabaseProvider
         await using var command = _connection!.CreateCommand();
         command.CommandText =
             """
-            SELECT name
-            FROM sqlite_master
-            WHERE type = 'table'
-              AND name NOT LIKE 'sqlite_%'
-            ORDER BY name;
+            SELECT TABLE_NAME
+            FROM information_schema.TABLES
+            WHERE TABLE_SCHEMA = @schema
+              AND TABLE_TYPE = 'BASE TABLE'
+            ORDER BY TABLE_NAME;
             """;
+        command.Parameters.AddWithValue("@schema", _databaseName);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
-            result.Add(new DatabaseTableInfo(reader.GetString(0)));
+        {
+            var name = reader.GetString(0);
+            if (_allowedTables.Count == 0 || _allowedTables.Contains(name))
+                result.Add(new DatabaseTableInfo(name));
+        }
         return result;
     }
 
@@ -73,16 +82,27 @@ public sealed class SqliteDatabaseProvider : IDatabaseProvider
         EnsureKnownTable(tableName);
         var result = new List<DatabaseColumnInfo>();
         await using var command = _connection!.CreateCommand();
-        command.CommandText = $"PRAGMA table_info({QuoteIdentifier(tableName)});";
+        command.CommandText =
+            """
+            SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE,
+                   COLUMN_KEY, COLUMN_DEFAULT, EXTRA
+            FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = @schema AND TABLE_NAME = @table
+            ORDER BY ORDINAL_POSITION;
+            """;
+        command.Parameters.AddWithValue("@schema", _databaseName);
+        command.Parameters.AddWithValue("@table", tableName);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
             result.Add(new DatabaseColumnInfo(
+                reader.GetString(0),
                 reader.GetString(1),
-                reader.IsDBNull(2) ? "TEXT" : reader.GetString(2),
-                reader.GetInt32(3) == 0,
-                reader.GetInt32(5) > 0,
-                reader.IsDBNull(4) ? null : reader.GetValue(4)));
+                reader.GetString(2).Equals("YES", StringComparison.OrdinalIgnoreCase),
+                reader.GetString(3).Equals("PRI", StringComparison.OrdinalIgnoreCase),
+                reader.IsDBNull(4) ? null : reader.GetValue(4),
+                reader.GetString(5).Contains(
+                    "auto_increment", StringComparison.OrdinalIgnoreCase)));
         }
         return result;
     }
@@ -98,16 +118,22 @@ public sealed class SqliteDatabaseProvider : IDatabaseProvider
         pageSize = Math.Clamp(pageSize, 10, 500);
         var quotedTable = QuoteIdentifier(tableName);
 
-        await using var countCommand = _connection!.CreateCommand();
-        countCommand.CommandText = $"SELECT COUNT(*) FROM {quotedTable};";
+        await using var count = _connection!.CreateCommand();
+        count.CommandText = $"SELECT COUNT(*) FROM {quotedTable};";
         var totalRows = Convert.ToInt64(
-            await countCommand.ExecuteScalarAsync(cancellationToken));
+            await count.ExecuteScalarAsync(cancellationToken));
 
+        var columns = await GetColumnsAsync(tableName, cancellationToken);
+        var primaryKey = columns.FirstOrDefault(column => column.IsPrimaryKey);
         await using var command = _connection.CreateCommand();
         command.CommandText =
-            $"SELECT * FROM {quotedTable} LIMIT $limit OFFSET $offset;";
-        command.Parameters.AddWithValue("$limit", pageSize);
-        command.Parameters.AddWithValue("$offset", (pageNumber - 1) * pageSize);
+            $"SELECT * FROM {quotedTable}" +
+            (primaryKey is null
+                ? ""
+                : $" ORDER BY {QuoteIdentifier(primaryKey.Name)}") +
+            " LIMIT @limit OFFSET @offset;";
+        command.Parameters.AddWithValue("@limit", pageSize);
+        command.Parameters.AddWithValue("@offset", (pageNumber - 1) * pageSize);
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         var table = new DataTable(tableName);
         table.Load(reader);
@@ -131,7 +157,7 @@ public sealed class SqliteDatabaseProvider : IDatabaseProvider
             foreach (var change in changes)
             {
                 await using var command = _connection.CreateCommand();
-                command.Transaction = (SqliteTransaction)transaction;
+                command.Transaction = transaction;
                 BuildChangeCommand(command, change);
                 var affected = await command.ExecuteNonQueryAsync(cancellationToken);
                 if (change.Operation is "UPDATE" or "DELETE" && affected != 1)
@@ -150,7 +176,7 @@ public sealed class SqliteDatabaseProvider : IDatabaseProvider
     }
 
     private static void BuildChangeCommand(
-        SqliteCommand command,
+        MySqlCommand command,
         DatabaseChangeDraft change)
     {
         var table = QuoteIdentifier(change.TableName);
@@ -159,12 +185,12 @@ public sealed class SqliteDatabaseProvider : IDatabaseProvider
             case "INSERT":
                 if (change.Values.Count == 0)
                     throw new InvalidOperationException("新增草稿没有字段。");
+                var insertNames = change.Values.Keys.ToArray();
                 command.CommandText =
                     $"INSERT INTO {table} (" +
-                    string.Join(", ", change.Values.Keys.Select(QuoteIdentifier)) +
+                    string.Join(", ", insertNames.Select(QuoteIdentifier)) +
                     ") VALUES (" +
-                    string.Join(", ", change.Values.Keys.Select(
-                        (_, index) => $"$v{index}")) +
+                    string.Join(", ", insertNames.Select((_, index) => $"@v{index}")) +
                     ");";
                 AddParameters(command, change.Values, "v");
                 break;
@@ -175,10 +201,10 @@ public sealed class SqliteDatabaseProvider : IDatabaseProvider
                 command.CommandText =
                     $"UPDATE {table} SET " +
                     string.Join(", ", change.Values.Keys.Select(
-                        (name, index) => $"{QuoteIdentifier(name)}=$v{index}")) +
+                        (name, index) => $"{QuoteIdentifier(name)}=@v{index}")) +
                     " WHERE " +
                     string.Join(" AND ", change.KeyValues.Keys.Select(
-                        (name, index) => $"{QuoteIdentifier(name)} IS $k{index}")) +
+                        (name, index) => $"{QuoteIdentifier(name)} <=> @k{index}")) +
                     ";";
                 AddParameters(command, change.Values, "v");
                 AddParameters(command, change.KeyValues, "k");
@@ -188,7 +214,7 @@ public sealed class SqliteDatabaseProvider : IDatabaseProvider
                 command.CommandText =
                     $"DELETE FROM {table} WHERE " +
                     string.Join(" AND ", change.KeyValues.Keys.Select(
-                        (name, index) => $"{QuoteIdentifier(name)} IS $k{index}")) +
+                        (name, index) => $"{QuoteIdentifier(name)} <=> @k{index}")) +
                     ";";
                 AddParameters(command, change.KeyValues, "k");
                 break;
@@ -198,14 +224,14 @@ public sealed class SqliteDatabaseProvider : IDatabaseProvider
     }
 
     private static void AddParameters(
-        SqliteCommand command,
+        MySqlCommand command,
         IReadOnlyDictionary<string, object?> values,
         string prefix)
     {
         var index = 0;
         foreach (var value in values.Values)
             command.Parameters.AddWithValue(
-                $"${prefix}{index++}", value ?? DBNull.Value);
+                $"@{prefix}{index++}", value ?? DBNull.Value);
     }
 
     private static void EnsureKeys(DatabaseChangeDraft change)
@@ -218,18 +244,18 @@ public sealed class SqliteDatabaseProvider : IDatabaseProvider
     private void EnsureConnected()
     {
         if (!IsConnected)
-            throw new InvalidOperationException("请先连接SQLite数据库。");
+            throw new InvalidOperationException("请先连接MySQL数据库。");
     }
 
     private void EnsureKnownTable(string tableName)
     {
         EnsureConnected();
         if (!_knownTables.Contains(tableName))
-            throw new InvalidOperationException($"数据表不存在或尚未加载：{tableName}");
+            throw new InvalidOperationException($"数据表不在允许范围内：{tableName}");
     }
 
     private static string QuoteIdentifier(string value) =>
-        $"\"{value.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
+        $"`{value.Replace("`", "``", StringComparison.Ordinal)}`";
 
     public async ValueTask DisposeAsync()
     {

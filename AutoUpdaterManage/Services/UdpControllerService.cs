@@ -28,6 +28,12 @@ public sealed record TaskProgressInfo(
     string Message,
     string? Detail,
     DateTimeOffset OccurredAt);
+public sealed record DatabaseSyncStatusInfo(
+    Guid RequestId,
+    string DeviceId,
+    bool Success,
+    string Message,
+    int AcceptedChanges);
 
 public sealed class UdpControllerService : IDisposable
 {
@@ -41,6 +47,7 @@ public sealed class UdpControllerService : IDisposable
     public event Action<DiscoveredDevice>? DeviceDiscovered;
     public event Action<UpdateStatusInfo>? UpdateStatusReceived;
     public event Action<TaskProgressInfo>? TaskProgressReceived;
+    public event Action<DatabaseSyncStatusInfo>? DatabaseSyncStatusReceived;
 
     public Task StartAsync()
     {
@@ -168,6 +175,36 @@ public sealed class UdpControllerService : IDisposable
             cancellationToken);
     }
 
+    public Task<DispatchAcknowledgement> SendDatabaseSyncReliableAsync(
+        string targetIp,
+        int targetPort,
+        string targetDeviceId,
+        string databaseName,
+        IReadOnlyList<DatabaseChangePayload> changes,
+        Guid requestId,
+        Action<int>? attemptStarted = null,
+        int maxAttempts = 3,
+        TimeSpan? acknowledgementTimeout = null,
+        CancellationToken cancellationToken = default)
+    {
+        var payload = new DatabaseSyncRequestPayload(
+            Environment.MachineName,
+            targetDeviceId,
+            databaseName,
+            changes);
+        var packet = UdpProtocol.Encode(
+            UdpCommand.DatabaseSyncRequest, requestId, payload);
+        return SendReliableAsync(
+            packet,
+            IPAddress.Parse(targetIp),
+            targetPort,
+            requestId,
+            attemptStarted,
+            maxAttempts,
+            acknowledgementTimeout ?? TimeSpan.FromSeconds(2),
+            cancellationToken);
+    }
+
     private async Task<DispatchAcknowledgement> SendReliableAsync(
         byte[] packet,
         IPAddress target,
@@ -281,6 +318,18 @@ public sealed class UdpControllerService : IDisposable
                                 result.Message,
                                 IsFinal: true,
                                 result.CurrentVersion));
+                        break;
+                    case UdpCommand.DatabaseSyncResult:
+                        var databaseResult =
+                            UdpProtocol.DecodePayload<DatabaseSyncResultPayload>(packet);
+                        if (databaseResult is not null)
+                            DatabaseSyncStatusReceived?.Invoke(
+                                new DatabaseSyncStatusInfo(
+                                    packet.RequestId,
+                                    databaseResult.DeviceId,
+                                    databaseResult.Success,
+                                    databaseResult.Message,
+                                    databaseResult.AcceptedChanges));
                         break;
                 }
             }

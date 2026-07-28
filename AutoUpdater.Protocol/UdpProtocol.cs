@@ -85,7 +85,9 @@ public enum UdpCommand : byte
     TaskProgress = 0x16,
     Heartbeat = 0x20,
     StatusQuery = 0x21,
-    StatusResponse = 0x22
+    StatusResponse = 0x22,
+    DatabaseSyncRequest = 0x30,
+    DatabaseSyncResult = 0x31
 }
 
 public readonly record struct UdpPacket(UdpCommand Command, Guid RequestId, byte[] Payload);
@@ -119,6 +121,25 @@ public sealed record UpdateResultPayload(
 
 public sealed record StatusResponsePayload(
     string DeviceId, string State, string CurrentVersion, string? ActiveTaskId);
+
+public sealed record DatabaseSyncRequestPayload(
+    string SenderId,
+    string TargetDeviceId,
+    string DatabaseName,
+    IReadOnlyList<DatabaseChangePayload> Changes);
+
+public sealed record DatabaseChangePayload(
+    Guid ChangeId,
+    string TableName,
+    string Operation,
+    IReadOnlyDictionary<string, JsonElement> Values,
+    IReadOnlyDictionary<string, JsonElement> KeyValues);
+
+public sealed record DatabaseSyncResultPayload(
+    string DeviceId,
+    bool Success,
+    string Message,
+    int AcceptedChanges);
 
 internal static class Crc32
 {

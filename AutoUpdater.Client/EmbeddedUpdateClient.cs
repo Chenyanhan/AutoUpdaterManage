@@ -15,6 +15,8 @@ public sealed class EmbeddedUpdateClient : IDisposable
     private readonly EmbeddedClientOptions _options;
     private readonly ProcessedRequestStore _processedRequests;
     private readonly ConcurrentDictionary<Guid, Lazy<Task<CommandOutcome>>> _inflightRequests = new();
+    private readonly ConcurrentDictionary<Guid,
+        Lazy<Task<DatabaseSyncExecutionResult>>> _inflightDatabaseRequests = new();
     private UdpClient? _udp;
     private UdpClient? _discoveryUdp;
     private CancellationTokenSource? _cancellation;
@@ -72,6 +74,9 @@ public sealed class EmbeddedUpdateClient : IDisposable
                     await HandleUpdateAsync(packet, datagram.RemoteEndPoint);
                 else if (!discoveryOnly && packet.Command == UdpCommand.RollbackRequest)
                     await HandleRollbackAsync(packet, datagram.RemoteEndPoint);
+                else if (!discoveryOnly &&
+                         packet.Command == UdpCommand.DatabaseSyncRequest)
+                    await HandleDatabaseSyncAsync(packet, datagram.RemoteEndPoint);
             }
             catch (OperationCanceledException)
             {
@@ -250,6 +255,115 @@ public sealed class EmbeddedUpdateClient : IDisposable
         return new CommandOutcome(accepted, message);
     }
 
+    private async Task HandleDatabaseSyncAsync(
+        UdpPacket packet,
+        IPEndPoint controller)
+    {
+        var request =
+            UdpProtocol.DecodePayload<DatabaseSyncRequestPayload>(packet);
+        if (request is null ||
+            !string.Equals(
+                request.TargetDeviceId,
+                _options.DeviceId,
+                StringComparison.OrdinalIgnoreCase))
+            return;
+
+        await SendTaskReceivedAsync(packet.RequestId, controller);
+        if (_processedRequests.TryGet(packet.RequestId, out var processed))
+        {
+            await SendDatabaseSyncResultAsync(
+                packet.RequestId,
+                controller,
+                processed.Accepted,
+                processed.Message,
+                processed.Accepted ? request.Changes.Count : 0);
+            return;
+        }
+
+        var operation = _inflightDatabaseRequests.GetOrAdd(
+            packet.RequestId,
+            _ => new Lazy<Task<DatabaseSyncExecutionResult>>(
+                () => ExecuteDatabaseSyncAsync(packet.RequestId, request),
+                LazyThreadSafetyMode.ExecutionAndPublication));
+        var result = await operation.Value;
+        await SendDatabaseSyncResultAsync(
+            packet.RequestId,
+            controller,
+            result.Success,
+            result.Message,
+            result.Success ? request.Changes.Count : 0);
+        _inflightDatabaseRequests.TryRemove(packet.RequestId, out _);
+    }
+
+    private async Task<DatabaseSyncExecutionResult> ExecuteDatabaseSyncAsync(
+        Guid requestId,
+        DatabaseSyncRequestPayload request)
+    {
+        var validationError = ValidateDatabaseSync(request);
+        if (validationError is not null)
+            return SaveDatabaseSyncResult(
+                requestId, false, validationError);
+        if (string.IsNullOrWhiteSpace(_options.DatabaseConnectionString))
+            return SaveDatabaseSyncResult(
+                requestId, false, "客户端尚未配置MySQL连接。");
+
+        try
+        {
+            var affectedRows = await DatabaseSyncExecutor.ExecuteAsync(
+                _options.DatabaseConnectionString,
+                request,
+                _cancellation?.Token ?? CancellationToken.None);
+            return SaveDatabaseSyncResult(
+                requestId,
+                true,
+                $"数据库同步成功：{request.Changes.Count} 条变更，影响 {affectedRows} 行");
+        }
+        catch (Exception ex)
+        {
+            return SaveDatabaseSyncResult(
+                requestId,
+                false,
+                $"数据库同步失败，事务已回滚：{ex.Message}");
+        }
+    }
+
+    private DatabaseSyncExecutionResult SaveDatabaseSyncResult(
+        Guid requestId,
+        bool success,
+        string message)
+    {
+        SaveProcessedRequest(new ProcessedRequest(
+            requestId,
+            "DatabaseSync",
+            success,
+            message,
+            DateTimeOffset.UtcNow));
+        return new DatabaseSyncExecutionResult(success, message);
+    }
+
+    private static string? ValidateDatabaseSync(
+        DatabaseSyncRequestPayload request)
+    {
+        if (string.IsNullOrWhiteSpace(request.DatabaseName))
+            return "数据库名称不能为空";
+        if (request.Changes.Count is 0 or > 500)
+            return "数据库变更数量必须在1到500条之间";
+        var allowedTables = new HashSet<string>(
+            ["data_result", "plc_user_manage"],
+            StringComparer.OrdinalIgnoreCase);
+        foreach (var change in request.Changes)
+        {
+            if (!allowedTables.Contains(change.TableName))
+                return $"不允许同步数据表：{change.TableName}";
+            if (change.Operation is not ("INSERT" or "UPDATE" or "DELETE"))
+                return $"不支持的数据库操作：{change.Operation}";
+            if (change.Operation is "UPDATE" or "DELETE" &&
+                change.KeyValues.Count == 0)
+                return $"{change.Operation} {change.TableName} 缺少主键";
+        }
+        return null;
+    }
+
     private void StartUpdater(IReadOnlyCollection<string> arguments)
     {
         var updaterPath = ResolveUpdaterExecutablePath();
@@ -330,6 +444,21 @@ public sealed class EmbeddedUpdateClient : IDisposable
             UdpCommand.UpdateResult, requestId,
             new UpdateResultPayload(_options.DeviceId, success, message)), target);
 
+    private Task SendDatabaseSyncResultAsync(
+        Guid requestId,
+        IPEndPoint target,
+        bool success,
+        string message,
+        int acceptedChanges) =>
+        SendAsync(UdpProtocol.Encode(
+            UdpCommand.DatabaseSyncResult,
+            requestId,
+            new DatabaseSyncResultPayload(
+                _options.DeviceId,
+                success,
+                message,
+                acceptedChanges)), target);
+
     private async Task SendAsync(byte[] packet, IPEndPoint target) =>
         await _udp!.SendAsync(packet, target);
 
@@ -371,6 +500,10 @@ public sealed class EmbeddedUpdateClient : IDisposable
         public bool TryClaimExecution() =>
             Interlocked.CompareExchange(ref _executionClaimed, 1, 0) == 0;
     }
+
+    private sealed record DatabaseSyncExecutionResult(
+        bool Success,
+        string Message);
 }
 
 public sealed record EmbeddedClientOptions(
@@ -380,7 +513,8 @@ public sealed record EmbeddedClientOptions(
     string? UpdaterExecutablePath = null,
     int Port = EmbeddedUpdateClient.DefaultPort,
     string? InstallationDirectory = null,
-    string? RestartExecutablePath = null);
+    string? RestartExecutablePath = null,
+    string? DatabaseConnectionString = null);
 
 public enum UpdateDecision
 {

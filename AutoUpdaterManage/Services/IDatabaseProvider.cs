@@ -17,4 +17,7 @@ public interface IDatabaseProvider : IAsyncDisposable
         int pageNumber,
         int pageSize,
         CancellationToken cancellationToken = default);
+    Task<int> ApplyChangesAsync(
+        IReadOnlyList<DatabaseChangeDraft> changes,
+        CancellationToken cancellationToken = default);
 }

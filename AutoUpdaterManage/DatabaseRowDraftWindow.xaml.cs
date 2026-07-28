@@ -11,17 +11,30 @@ namespace AutoUpdaterManage;
 public partial class DatabaseRowDraftWindow : ThemedWindow
 {
     private readonly string _tableName;
+    private readonly string _operation;
+    private readonly IReadOnlyDictionary<string, object?> _keyValues;
 
     public DatabaseRowDraftWindow(
         string tableName,
-        IReadOnlyList<DatabaseColumnInfo> columns)
+        IReadOnlyList<DatabaseColumnInfo> columns,
+        string operation = "INSERT",
+        IReadOnlyDictionary<string, object?>? initialValues = null)
     {
         _tableName = tableName;
+        _operation = operation;
+        _keyValues = columns
+            .Where(column => column.IsPrimaryKey)
+            .ToDictionary(
+                column => column.Name,
+                column => initialValues?.GetValueOrDefault(column.Name));
         Fields = new ObservableCollection<DraftField>(
-            columns.Select(column => new DraftField(column)));
+            columns.Select(column => new DraftField(
+                column, initialValues?.GetValueOrDefault(column.Name))));
         InitializeComponent();
         DataContext = this;
-        HeadingText.Text = $"向 {tableName} 新增数据";
+        HeadingText.Text = operation == "UPDATE"
+            ? $"编辑 {tableName} 数据"
+            : $"向 {tableName} 新增数据";
     }
 
     public ObservableCollection<DraftField> Fields { get; }
@@ -34,8 +47,10 @@ public partial class DatabaseRowDraftWindow : ThemedWindow
         {
             if (string.IsNullOrWhiteSpace(field.Value))
             {
+                if (field.Column.IsAutoIncrement ||
+                    field.Column.DefaultValue is not null)
+                    continue;
                 if (!field.Column.IsNullable &&
-                    field.Column.DefaultValue is null &&
                     !field.Column.IsPrimaryKey)
                 {
                     MessageBox.Show(
@@ -45,7 +60,8 @@ public partial class DatabaseRowDraftWindow : ThemedWindow
                         MessageBoxImage.Information);
                     return;
                 }
-                values[field.Name] = null;
+                if (_operation == "UPDATE")
+                    values[field.Name] = null;
                 continue;
             }
             values[field.Name] = ConvertValue(field.Value, field.Column.DataType);
@@ -54,8 +70,9 @@ public partial class DatabaseRowDraftWindow : ThemedWindow
         {
             Id = Guid.NewGuid(),
             TableName = _tableName,
-            Operation = "INSERT",
+            Operation = _operation,
             Values = values,
+            KeyValues = _keyValues,
             CreatedAt = DateTime.Now
         };
         DialogResult = true;
@@ -85,14 +102,18 @@ public sealed class DraftField : INotifyPropertyChanged
 {
     private string? _value;
 
-    public DraftField(DatabaseColumnInfo column)
+    public DraftField(DatabaseColumnInfo column, object? initialValue = null)
     {
         Column = column;
         Name = column.Name;
         Description =
             $"{column.DataType}" +
             $"{(column.IsPrimaryKey ? " · 主键" : "")}" +
+            $"{(column.IsAutoIncrement ? " · 自增" : "")}" +
             $"{(column.IsNullable ? " · 可空" : " · 必填")}";
+        _value = initialValue is null or DBNull
+            ? null
+            : Convert.ToString(initialValue);
     }
 
     public DatabaseColumnInfo Column { get; }
