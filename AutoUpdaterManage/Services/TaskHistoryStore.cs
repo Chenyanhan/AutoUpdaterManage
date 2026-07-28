@@ -44,7 +44,8 @@ public sealed class TaskHistoryStore : IDisposable
                     """
                     SELECT request_id, device_id, device_name, ip_address,
                            operation, source, source_version, target_version,
-                           state, message, created_at, updated_at, result_version
+                           state, message, created_at, updated_at, result_version,
+                           attempt_count, last_sent_at
                     FROM update_tasks
                     ORDER BY created_at DESC
                     LIMIT $limit;
@@ -69,7 +70,12 @@ public sealed class TaskHistoryStore : IDisposable
                             System.Globalization.DateTimeStyles.RoundtripKind),
                         DateTime.Parse(reader.GetString(11), null,
                             System.Globalization.DateTimeStyles.RoundtripKind),
-                        GetNullableString(reader, 12)));
+                        GetNullableString(reader, 12),
+                        reader.GetInt32(13),
+                        reader.IsDBNull(14)
+                            ? null
+                            : DateTime.Parse(reader.GetString(14), null,
+                                System.Globalization.DateTimeStyles.RoundtripKind)));
                 }
                 return result;
             }
@@ -102,16 +108,20 @@ public sealed class TaskHistoryStore : IDisposable
                     INSERT INTO update_tasks (
                         request_id, device_id, device_name, ip_address,
                         operation, source, source_version, target_version,
-                        state, message, created_at, updated_at, result_version)
+                        state, message, created_at, updated_at, result_version,
+                        attempt_count, last_sent_at)
                     VALUES (
                         $request_id, $device_id, $device_name, $ip_address,
                         $operation, $source, $source_version, $target_version,
-                        $state, $message, $created_at, $updated_at, $result_version)
+                        $state, $message, $created_at, $updated_at, $result_version,
+                        $attempt_count, $last_sent_at)
                     ON CONFLICT(request_id) DO UPDATE SET
                         state = excluded.state,
                         message = excluded.message,
                         updated_at = excluded.updated_at,
-                        result_version = excluded.result_version;
+                        result_version = excluded.result_version,
+                        attempt_count = excluded.attempt_count,
+                        last_sent_at = excluded.last_sent_at;
                     """;
                 AddParameters(command, record);
                 await command.ExecuteNonQueryAsync(cancellationToken);
@@ -149,7 +159,9 @@ public sealed class TaskHistoryStore : IDisposable
                 message TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                result_version TEXT NULL
+                result_version TEXT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                last_sent_at TEXT NULL
             );
             CREATE INDEX IF NOT EXISTS ix_update_tasks_created_at
                 ON update_tasks(created_at DESC);
@@ -157,6 +169,12 @@ public sealed class TaskHistoryStore : IDisposable
                 ON update_tasks(device_id);
             """;
         await command.ExecuteNonQueryAsync(cancellationToken);
+        await EnsureColumnAsync(
+            connection, "attempt_count",
+            "INTEGER NOT NULL DEFAULT 0", cancellationToken);
+        await EnsureColumnAsync(
+            connection, "last_sent_at",
+            "TEXT NULL", cancellationToken);
         _initialized = true;
     }
 
@@ -165,6 +183,29 @@ public sealed class TaskHistoryStore : IDisposable
         var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         return connection;
+    }
+
+    private static async Task EnsureColumnAsync(
+        SqliteConnection connection,
+        string columnName,
+        string declaration,
+        CancellationToken cancellationToken)
+    {
+        await using var check = connection.CreateCommand();
+        check.CommandText = "PRAGMA table_info(update_tasks);";
+        await using var reader = await check.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            if (reader.GetString(1).Equals(
+                    columnName, StringComparison.OrdinalIgnoreCase))
+                return;
+        }
+        await reader.DisposeAsync();
+
+        await using var alter = connection.CreateCommand();
+        alter.CommandText =
+            $"ALTER TABLE update_tasks ADD COLUMN {columnName} {declaration};";
+        await alter.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private static string? GetNullableString(SqliteDataReader reader, int ordinal) =>
@@ -189,6 +230,11 @@ public sealed class TaskHistoryStore : IDisposable
         command.Parameters.AddWithValue("$updated_at", record.UpdatedAt.ToString("O"));
         command.Parameters.AddWithValue("$result_version",
             (object?)record.ResultVersion ?? DBNull.Value);
+        command.Parameters.AddWithValue("$attempt_count", record.AttemptCount);
+        command.Parameters.AddWithValue("$last_sent_at",
+            record.LastSentAt.HasValue
+                ? record.LastSentAt.Value.ToString("O")
+                : DBNull.Value);
     }
 
     public void Dispose() => _gate.Dispose();

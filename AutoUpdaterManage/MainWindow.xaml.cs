@@ -181,15 +181,28 @@ public partial class MainWindow : ThemedWindow
             AddTask(task);
             try
             {
-                await _controllerService.SendUpdateAsync(
+                var acknowledgement = await _controllerService.SendUpdateReliableAsync(
                     device.IpAddress, device.UdpPort, device.DeviceId, updatePath,
-                    requestId);
-                if (task.State == UpdateTaskState.Dispatching)
+                    requestId,
+                    attempt =>
+                    {
+                        task.RecordAttempt(attempt);
+                        _ = _taskHistoryStore.SaveAsync(task);
+                    });
+                if (!acknowledgement.Received)
                 {
-                    task.ApplyStatus(UpdateTaskState.Sent, "更新指令已下发");
+                    task.ApplyStatus(
+                        UpdateTaskState.NoResponse, acknowledgement.Message);
                     _ = _taskHistoryStore.SaveAsync(task);
+                    device.UpdateResult = acknowledgement.Message;
                 }
-                device.UpdateResult = "指令已发送";
+                else if (task.State == UpdateTaskState.Dispatching)
+                {
+                    task.ApplyStatus(
+                        UpdateTaskState.Sent, "设备已收到指令，等待用户确认");
+                    _ = _taskHistoryStore.SaveAsync(task);
+                    device.UpdateResult = "设备已收到指令，等待用户确认";
+                }
             }
             catch (Exception ex)
             {
@@ -235,15 +248,29 @@ public partial class MainWindow : ThemedWindow
             AddTask(task);
             try
             {
-                await _controllerService.SendRollbackAsync(
+                var acknowledgement = await _controllerService.SendRollbackReliableAsync(
                     device.IpAddress, device.UdpPort, device.DeviceId,
-                    targetVersion: null, requestId);
-                if (task.State == UpdateTaskState.Dispatching)
+                    targetVersion: null,
+                    requestId,
+                    attempt =>
+                    {
+                        task.RecordAttempt(attempt);
+                        _ = _taskHistoryStore.SaveAsync(task);
+                    });
+                if (!acknowledgement.Received)
                 {
-                    task.ApplyStatus(UpdateTaskState.Sent, "回退指令已下发");
+                    task.ApplyStatus(
+                        UpdateTaskState.NoResponse, acknowledgement.Message);
                     _ = _taskHistoryStore.SaveAsync(task);
+                    device.UpdateResult = acknowledgement.Message;
                 }
-                device.UpdateResult = "回退指令已发送";
+                else if (task.State == UpdateTaskState.Dispatching)
+                {
+                    task.ApplyStatus(
+                        UpdateTaskState.Sent, "设备已收到指令，等待用户确认");
+                    _ = _taskHistoryStore.SaveAsync(task);
+                    device.UpdateResult = "设备已收到指令，等待用户确认";
+                }
             }
             catch (Exception ex)
             {

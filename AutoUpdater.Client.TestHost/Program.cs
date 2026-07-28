@@ -14,6 +14,8 @@ var listenPort = args.Length > 2 && int.TryParse(args[2], out var parsedPort)
     ? parsedPort
     : EmbeddedUpdateClient.DefaultPort;
 var restartExecutable = Path.GetFileName(Environment.ProcessPath);
+var automatedDecision = Environment.GetEnvironmentVariable(
+    "AUTOUPDATER_TEST_DECISION");
 
 if (string.IsNullOrWhiteSpace(restartExecutable))
 {
@@ -39,13 +41,19 @@ client.UpdateDecisionRequired += command =>
 {
     Console.WriteLine($"收到更新：{command.UpdatePath}");
     Console.WriteLine("测试宿主自动接受更新。");
-    return DesktopUpdatePrompt.ShowUpdateAsync(command, Environment.MachineName);
+    return automatedDecision?.Equals(
+        "postpone", StringComparison.OrdinalIgnoreCase) == true
+        ? Task.FromResult(UpdateDecision.Postpone)
+        : DesktopUpdatePrompt.ShowUpdateAsync(command, Environment.MachineName);
 };
 client.RollbackDecisionRequired += command =>
 {
     Console.WriteLine($"收到回退：{command.TargetVersion ?? "最近备份"}");
     Console.WriteLine("测试宿主自动接受回退。");
-    return DesktopUpdatePrompt.ShowRollbackAsync(command, Environment.MachineName);
+    return automatedDecision?.Equals(
+        "postpone", StringComparison.OrdinalIgnoreCase) == true
+        ? Task.FromResult(UpdateDecision.Postpone)
+        : DesktopUpdatePrompt.ShowRollbackAsync(command, Environment.MachineName);
 };
 client.ShutdownRequested += () =>
 {

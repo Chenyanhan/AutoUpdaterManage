@@ -298,6 +298,7 @@
                                 <ComboBoxItem Content="稍后更新"/>
                                 <ComboBoxItem Content="成功"/>
                                 <ComboBoxItem Content="失败"/>
+                                <ComboBoxItem Content="设备无响应"/>
                             </ComboBox>
                             <TextBlock x:Name="TaskSummaryText" Grid.Column="2"
                                        Margin="18,0,0,0" VerticalAlignment="Center"
@@ -332,8 +333,10 @@
                                             Width="75" AllowEditing="False"/>
                             <dxg:GridColumn FieldName="StateText" Header="状态"
                                             Width="85" AllowEditing="False"/>
+                            <dxg:GridColumn FieldName="AttemptText" Header="发送次数"
+                                            Width="70" AllowEditing="False"/>
                             <dxg:GridColumn FieldName="Message" Header="执行信息"
-                                            Width="180" AllowEditing="False"/>
+                                            Width="160" AllowEditing="False"/>
                             <dxg:GridColumn FieldName="UpdatedAtText" Header="更新时间"
                                             Width="135" AllowEditing="False"/>
                         </dxg:GridControl>

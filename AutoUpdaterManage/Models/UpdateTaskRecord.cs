@@ -16,7 +16,8 @@ public enum UpdateTaskState
     Accepted,
     Postponed,
     Succeeded,
-    Failed
+    Failed,
+    NoResponse
 }
 
 public sealed class UpdateTaskRecord : INotifyPropertyChanged
@@ -25,6 +26,8 @@ public sealed class UpdateTaskRecord : INotifyPropertyChanged
     private string _message;
     private string? _resultVersion;
     private DateTime _updatedAt;
+    private int _attemptCount;
+    private DateTime? _lastSentAt;
 
     public UpdateTaskRecord(
         Guid requestId,
@@ -39,7 +42,9 @@ public sealed class UpdateTaskRecord : INotifyPropertyChanged
         string message,
         DateTime createdAt,
         DateTime updatedAt,
-        string? resultVersion = null)
+        string? resultVersion = null,
+        int attemptCount = 0,
+        DateTime? lastSentAt = null)
     {
         RequestId = requestId;
         DeviceId = deviceId;
@@ -54,6 +59,8 @@ public sealed class UpdateTaskRecord : INotifyPropertyChanged
         CreatedAt = createdAt;
         _updatedAt = updatedAt;
         _resultVersion = resultVersion;
+        _attemptCount = attemptCount;
+        _lastSentAt = lastSentAt;
     }
 
     public Guid RequestId { get; }
@@ -81,10 +88,15 @@ public sealed class UpdateTaskRecord : INotifyPropertyChanged
         UpdateTaskState.Postponed => "稍后更新",
         UpdateTaskState.Succeeded => "成功",
         UpdateTaskState.Failed => "失败",
+        UpdateTaskState.NoResponse => "设备无响应",
         _ => "未知"
     };
     public string Message => _message;
     public string? ResultVersion => _resultVersion;
+    public int AttemptCount => _attemptCount;
+    public string AttemptText => _attemptCount == 0 ? "—" : $"{_attemptCount}/3";
+    public DateTime? LastSentAt => _lastSentAt;
+    public string LastSentAtText => _lastSentAt?.ToString("HH:mm:ss") ?? "—";
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -102,6 +114,23 @@ public sealed class UpdateTaskRecord : INotifyPropertyChanged
         OnPropertyChanged(nameof(StateText));
         OnPropertyChanged(nameof(Message));
         OnPropertyChanged(nameof(ResultVersion));
+        OnPropertyChanged(nameof(UpdatedAt));
+        OnPropertyChanged(nameof(UpdatedAtText));
+    }
+
+    public void RecordAttempt(int attempt, DateTime? sentAt = null)
+    {
+        _attemptCount = attempt;
+        _lastSentAt = sentAt ?? DateTime.Now;
+        _updatedAt = _lastSentAt.Value;
+        _message = attempt == 1
+            ? "正在发送指令"
+            : $"第 {attempt} 次重试发送";
+        OnPropertyChanged(nameof(AttemptCount));
+        OnPropertyChanged(nameof(AttemptText));
+        OnPropertyChanged(nameof(LastSentAt));
+        OnPropertyChanged(nameof(LastSentAtText));
+        OnPropertyChanged(nameof(Message));
         OnPropertyChanged(nameof(UpdatedAt));
         OnPropertyChanged(nameof(UpdatedAtText));
     }

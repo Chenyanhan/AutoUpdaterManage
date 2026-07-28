@@ -3,6 +3,7 @@ using System.IO;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Collections.Concurrent;
 using AutoUpdater.Protocol;
 
 namespace AutoUpdater.Client;
@@ -12,13 +13,19 @@ public sealed class EmbeddedUpdateClient : IDisposable
 {
     public const int DefaultPort = 45678;
     private readonly EmbeddedClientOptions _options;
-    private readonly HashSet<Guid> _handledRequests = [];
-    private readonly object _requestLock = new();
+    private readonly ProcessedRequestStore _processedRequests;
+    private readonly ConcurrentDictionary<Guid, Lazy<Task<CommandOutcome>>> _inflightRequests = new();
     private UdpClient? _udp;
     private UdpClient? _discoveryUdp;
     private CancellationTokenSource? _cancellation;
 
-    public EmbeddedUpdateClient(EmbeddedClientOptions options) => _options = options;
+    public EmbeddedUpdateClient(EmbeddedClientOptions options)
+    {
+        _options = options;
+        var installationDirectory = Path.GetFullPath(
+            options.InstallationDirectory ?? AppContext.BaseDirectory);
+        _processedRequests = new ProcessedRequestStore(installationDirectory);
+    }
 
     public event Func<UpdateCommandContext, Task<bool>>? UpdateConfirmationRequired;
     public event Func<RollbackCommandContext, Task<bool>>? RollbackConfirmationRequired;
@@ -90,17 +97,32 @@ public sealed class EmbeddedUpdateClient : IDisposable
         var request = UdpProtocol.DecodePayload<UpdateRequestPayload>(packet);
         if (request is null ||
             !string.Equals(request.TargetDeviceId, _options.DeviceId,
-                StringComparison.OrdinalIgnoreCase) ||
-            !TryRegisterRequest(packet.RequestId))
+                StringComparison.OrdinalIgnoreCase))
             return;
 
-        var context = new UpdateCommandContext(
-            packet.RequestId, controller.Address.ToString(), request.UpdatePath);
-        var decision = await GetUpdateDecisionAsync(context);
-        var accepted = decision == UpdateDecision.InstallNow;
-        await SendAcceptedAsync(packet.RequestId, controller, accepted,
-            accepted ? "设备已接受更新" : "用户选择稍后更新");
-        if (!accepted) return;
+        await SendTaskReceivedAsync(packet.RequestId, controller);
+        if (_processedRequests.TryGet(packet.RequestId, out var processed))
+        {
+            await SendAcceptedAsync(
+                packet.RequestId, controller, processed.Accepted, processed.Message);
+            return;
+        }
+
+        var operation = _inflightRequests.GetOrAdd(
+            packet.RequestId,
+            _ => new Lazy<Task<CommandOutcome>>(
+                () => ConfirmUpdateAsync(packet.RequestId, controller, request),
+                LazyThreadSafetyMode.ExecutionAndPublication));
+        var outcome = await operation.Value;
+        await SendAcceptedAsync(
+            packet.RequestId, controller, outcome.Accepted, outcome.Message);
+        if (!outcome.Accepted)
+        {
+            _inflightRequests.TryRemove(packet.RequestId, out _);
+            return;
+        }
+        if (!outcome.TryClaimExecution())
+            return;
 
         try
         {
@@ -113,6 +135,27 @@ public sealed class EmbeddedUpdateClient : IDisposable
         {
             await SendResultAsync(packet.RequestId, controller, false, ex.Message);
         }
+        finally
+        {
+            _inflightRequests.TryRemove(packet.RequestId, out _);
+        }
+    }
+
+    private async Task<CommandOutcome> ConfirmUpdateAsync(
+        Guid requestId,
+        IPEndPoint controller,
+        UpdateRequestPayload request)
+    {
+        var context = new UpdateCommandContext(
+            requestId, controller.Address.ToString(), request.UpdatePath);
+        var accepted =
+            await GetUpdateDecisionAsync(context) == UpdateDecision.InstallNow;
+        var message = accepted
+            ? "设备已接受更新"
+            : "用户选择稍后更新";
+        SaveProcessedRequest(new ProcessedRequest(
+            requestId, "Update", accepted, message, DateTimeOffset.UtcNow));
+        return new CommandOutcome(accepted, message);
     }
 
     private async Task<UpdateDecision> GetUpdateDecisionAsync(
@@ -146,17 +189,32 @@ public sealed class EmbeddedUpdateClient : IDisposable
         var request = UdpProtocol.DecodePayload<RollbackRequestPayload>(packet);
         if (request is null ||
             !string.Equals(request.TargetDeviceId, _options.DeviceId,
-                StringComparison.OrdinalIgnoreCase) ||
-            !TryRegisterRequest(packet.RequestId))
+                StringComparison.OrdinalIgnoreCase))
             return;
 
-        var context = new RollbackCommandContext(
-            packet.RequestId, controller.Address.ToString(), request.TargetVersion);
-        var decision = await GetRollbackDecisionAsync(context);
-        var accepted = decision == UpdateDecision.InstallNow;
-        await SendAcceptedAsync(packet.RequestId, controller, accepted,
-            accepted ? "设备已接受版本回退" : "用户选择稍后处理");
-        if (!accepted) return;
+        await SendTaskReceivedAsync(packet.RequestId, controller);
+        if (_processedRequests.TryGet(packet.RequestId, out var processed))
+        {
+            await SendAcceptedAsync(
+                packet.RequestId, controller, processed.Accepted, processed.Message);
+            return;
+        }
+
+        var operation = _inflightRequests.GetOrAdd(
+            packet.RequestId,
+            _ => new Lazy<Task<CommandOutcome>>(
+                () => ConfirmRollbackAsync(packet.RequestId, controller, request),
+                LazyThreadSafetyMode.ExecutionAndPublication));
+        var outcome = await operation.Value;
+        await SendAcceptedAsync(
+            packet.RequestId, controller, outcome.Accepted, outcome.Message);
+        if (!outcome.Accepted)
+        {
+            _inflightRequests.TryRemove(packet.RequestId, out _);
+            return;
+        }
+        if (!outcome.TryClaimExecution())
+            return;
 
         try
         {
@@ -169,6 +227,27 @@ public sealed class EmbeddedUpdateClient : IDisposable
         {
             await SendResultAsync(packet.RequestId, controller, false, ex.Message);
         }
+        finally
+        {
+            _inflightRequests.TryRemove(packet.RequestId, out _);
+        }
+    }
+
+    private async Task<CommandOutcome> ConfirmRollbackAsync(
+        Guid requestId,
+        IPEndPoint controller,
+        RollbackRequestPayload request)
+    {
+        var context = new RollbackCommandContext(
+            requestId, controller.Address.ToString(), request.TargetVersion);
+        var accepted =
+            await GetRollbackDecisionAsync(context) == UpdateDecision.InstallNow;
+        var message = accepted
+            ? "设备已接受版本回退"
+            : "用户选择稍后处理";
+        SaveProcessedRequest(new ProcessedRequest(
+            requestId, "Rollback", accepted, message, DateTimeOffset.UtcNow));
+        return new CommandOutcome(accepted, message);
     }
 
     private void StartUpdater(IReadOnlyCollection<string> arguments)
@@ -239,6 +318,12 @@ public sealed class EmbeddedUpdateClient : IDisposable
             UdpCommand.UpdateAccepted, requestId,
             new UpdateAcceptedPayload(_options.DeviceId, accepted, message)), target);
 
+    private Task SendTaskReceivedAsync(Guid requestId, IPEndPoint target) =>
+        SendAsync(UdpProtocol.Encode(
+            UdpCommand.TaskReceived,
+            requestId,
+            new TaskReceivedPayload(_options.DeviceId)), target);
+
     private Task SendResultAsync(
         Guid requestId, IPEndPoint target, bool success, string message) =>
         SendAsync(UdpProtocol.Encode(
@@ -248,13 +333,15 @@ public sealed class EmbeddedUpdateClient : IDisposable
     private async Task SendAsync(byte[] packet, IPEndPoint target) =>
         await _udp!.SendAsync(packet, target);
 
-    private bool TryRegisterRequest(Guid requestId)
+    private void SaveProcessedRequest(ProcessedRequest request)
     {
-        lock (_requestLock)
+        try
         {
-            if (!_handledRequests.Add(requestId)) return false;
-            if (_handledRequests.Count > 1000) _handledRequests.Clear();
-            return true;
+            _processedRequests.Save(request);
+        }
+        catch (Exception ex)
+        {
+            Error?.Invoke(ex);
         }
     }
 
@@ -272,6 +359,17 @@ public sealed class EmbeddedUpdateClient : IDisposable
         _udp?.Dispose();
         _discoveryUdp?.Dispose();
         _cancellation?.Dispose();
+    }
+
+    private sealed class CommandOutcome(bool accepted, string message)
+    {
+        private int _executionClaimed;
+
+        public bool Accepted { get; } = accepted;
+        public string Message { get; } = message;
+
+        public bool TryClaimExecution() =>
+            Interlocked.CompareExchange(ref _executionClaimed, 1, 0) == 0;
     }
 }
 

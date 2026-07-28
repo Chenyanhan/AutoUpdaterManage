@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Net.NetworkInformation;
+using System.Collections.Concurrent;
 using AutoUpdater.Protocol;
 
 namespace AutoUpdaterManage.Services;
@@ -14,6 +15,11 @@ public sealed record UpdateStatusInfo(
     string Message,
     bool IsFinal,
     string? CurrentVersion = null);
+public sealed record DispatchAcknowledgement(
+    bool Received,
+    bool Accepted,
+    string Message,
+    int Attempts);
 
 public sealed class UdpControllerService : IDisposable
 {
@@ -21,6 +27,8 @@ public sealed class UdpControllerService : IDisposable
     public const int DevicePort = 45678;
     private UdpClient? _udp;
     private CancellationTokenSource? _cancellation;
+    private readonly ConcurrentDictionary<Guid,
+        TaskCompletionSource<TaskReceivedPayload>> _pendingAcknowledgements = new();
 
     public event Action<DiscoveredDevice>? DeviceDiscovered;
     public event Action<UpdateStatusInfo>? UpdateStatusReceived;
@@ -99,6 +107,112 @@ public sealed class UdpControllerService : IDisposable
             IPAddress.Parse(targetIp), targetPort, cancellationToken);
     }
 
+    public Task<DispatchAcknowledgement> SendUpdateReliableAsync(
+        string targetIp,
+        int targetPort,
+        string targetDeviceId,
+        string updatePath,
+        Guid requestId,
+        Action<int>? attemptStarted = null,
+        int maxAttempts = 3,
+        TimeSpan? acknowledgementTimeout = null,
+        CancellationToken cancellationToken = default)
+    {
+        var payload = new UpdateRequestPayload(
+            Environment.MachineName, targetDeviceId, updatePath);
+        var packet = UdpProtocol.Encode(
+            UdpCommand.UpdateRequest, requestId, payload);
+        return SendReliableAsync(
+            packet,
+            IPAddress.Parse(targetIp),
+            targetPort,
+            requestId,
+            attemptStarted,
+            maxAttempts,
+            acknowledgementTimeout ?? TimeSpan.FromSeconds(2),
+            cancellationToken);
+    }
+
+    public Task<DispatchAcknowledgement> SendRollbackReliableAsync(
+        string targetIp,
+        int targetPort,
+        string targetDeviceId,
+        string? targetVersion,
+        Guid requestId,
+        Action<int>? attemptStarted = null,
+        int maxAttempts = 3,
+        TimeSpan? acknowledgementTimeout = null,
+        CancellationToken cancellationToken = default)
+    {
+        var payload = new RollbackRequestPayload(
+            Environment.MachineName, targetDeviceId, targetVersion);
+        var packet = UdpProtocol.Encode(
+            UdpCommand.RollbackRequest, requestId, payload);
+        return SendReliableAsync(
+            packet,
+            IPAddress.Parse(targetIp),
+            targetPort,
+            requestId,
+            attemptStarted,
+            maxAttempts,
+            acknowledgementTimeout ?? TimeSpan.FromSeconds(2),
+            cancellationToken);
+    }
+
+    private async Task<DispatchAcknowledgement> SendReliableAsync(
+        byte[] packet,
+        IPAddress target,
+        int targetPort,
+        Guid requestId,
+        Action<int>? attemptStarted,
+        int maxAttempts,
+        TimeSpan acknowledgementTimeout,
+        CancellationToken cancellationToken)
+    {
+        if (maxAttempts < 1)
+            throw new ArgumentOutOfRangeException(
+                nameof(maxAttempts), "至少需要发送一次。");
+
+        var completion = new TaskCompletionSource<TaskReceivedPayload>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!_pendingAcknowledgements.TryAdd(requestId, completion))
+            throw new InvalidOperationException($"任务 {requestId:N} 正在等待设备确认。");
+
+        try
+        {
+            for (var attempt = 1; attempt <= maxAttempts; attempt++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                attemptStarted?.Invoke(attempt);
+                await SendAsync(packet, target, targetPort, cancellationToken);
+
+                var timeoutTask = Task.Delay(
+                    acknowledgementTimeout, cancellationToken);
+                var completed = await Task.WhenAny(completion.Task, timeoutTask);
+                if (completed == completion.Task)
+                {
+                    var response = await completion.Task;
+                    return new DispatchAcknowledgement(
+                        true,
+                        true,
+                        "设备已收到指令",
+                        attempt);
+                }
+                await timeoutTask;
+            }
+
+            return new DispatchAcknowledgement(
+                false,
+                false,
+                $"发送 {maxAttempts} 次后设备仍未确认",
+                maxAttempts);
+        }
+        finally
+        {
+            _pendingAcknowledgements.TryRemove(requestId, out _);
+        }
+    }
+
     private async Task ReceiveLoopAsync(CancellationToken cancellationToken)
     {
         while (!cancellationToken.IsCancellationRequested)
@@ -120,12 +234,21 @@ public sealed class UdpControllerService : IDisposable
                     case UdpCommand.UpdateAccepted:
                         var accepted = UdpProtocol.DecodePayload<UpdateAcceptedPayload>(packet);
                         if (accepted is not null)
+                        {
                             UpdateStatusReceived?.Invoke(new UpdateStatusInfo(
                                 packet.RequestId,
                                 accepted.DeviceId,
                                 accepted.Accepted,
                                 accepted.Message,
                                 IsFinal: false));
+                        }
+                        break;
+                    case UdpCommand.TaskReceived:
+                        var receipt = UdpProtocol.DecodePayload<TaskReceivedPayload>(packet);
+                        if (receipt is not null &&
+                            _pendingAcknowledgements.TryGetValue(
+                                packet.RequestId, out var pending))
+                            pending.TrySetResult(receipt);
                         break;
                     case UdpCommand.UpdateResult:
                         var result = UdpProtocol.DecodePayload<UpdateResultPayload>(packet);
@@ -165,6 +288,9 @@ public sealed class UdpControllerService : IDisposable
     public void Dispose()
     {
         _cancellation?.Cancel();
+        foreach (var pending in _pendingAcknowledgements.Values)
+            pending.TrySetCanceled();
+        _pendingAcknowledgements.Clear();
         _udp?.Dispose();
         _cancellation?.Dispose();
     }
