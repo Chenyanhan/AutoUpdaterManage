@@ -32,31 +32,19 @@ if (!string.IsNullOrWhiteSpace(environmentDatabaseConnection))
         Console.Error.WriteLine(test.Message);
         return 3;
     }
-    await ClientDatabaseSettingsStore.SaveAsync(
-        installationDirectory, builder);
     databaseConnectionString = builder.ConnectionString;
     databaseConfigurationMessage =
-        $"数据库同步：连接测试成功，密码已加密保存到 " +
-        ClientDatabaseSettingsStore.GetDefaultPath(installationDirectory);
+        "数据库同步：测试环境变量连接成功（不会写入配置文件）";
 }
 else
 {
     databaseConnectionString =
         ClientDatabaseSettingsStore.TryLoadFromApplicationConfig(
             installationDirectory,
-            restartExecutable,
+            ClientDatabaseSettingsStore.DefaultHostExecutableName,
             out databaseConfigurationMessage);
-    if (databaseConnectionString is null)
-    {
-        databaseConnectionString =
-            ClientDatabaseSettingsStore.TryLoadConnectionString(
-                installationDirectory,
-                out databaseConfigurationMessage);
-    }
     databaseConfigurationMessage =
-        databaseConnectionString is null
-            ? $"数据库同步：{databaseConfigurationMessage}"
-            : $"数据库同步：{databaseConfigurationMessage}";
+        $"数据库同步：{databaseConfigurationMessage}";
 }
 
 if (string.IsNullOrWhiteSpace(restartExecutable))

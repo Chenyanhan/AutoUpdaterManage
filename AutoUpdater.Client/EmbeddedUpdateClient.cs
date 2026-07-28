@@ -34,10 +34,7 @@ public sealed class EmbeddedUpdateClient : IDisposable
             ClientDatabaseSettingsStore.TryLoadFromApplicationConfig(
                 installationDirectory,
                 options.RestartExecutablePath ??
-                Path.GetFileName(Environment.ProcessPath),
-                out _) ??
-            ClientDatabaseSettingsStore.TryLoadConnectionString(
-                installationDirectory,
+                ClientDatabaseSettingsStore.DefaultHostExecutableName,
                 out _);
     }
 

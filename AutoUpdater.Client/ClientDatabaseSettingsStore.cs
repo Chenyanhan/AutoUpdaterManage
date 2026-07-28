@@ -1,19 +1,8 @@
-using System.Security.Cryptography;
-using System.Text;
-using System.Text.Json;
 using System.IO;
 using System.Xml.Linq;
 using MySqlConnector;
 
 namespace AutoUpdater.Client;
-
-public sealed record ClientDatabaseSettings(
-    string Server,
-    uint Port,
-    string Database,
-    string UserId,
-    string EncryptedPassword,
-    string SslMode = "None");
 
 public sealed record DatabaseConnectionTestResult(
     bool Success,
@@ -22,19 +11,7 @@ public sealed record DatabaseConnectionTestResult(
 
 public static class ClientDatabaseSettingsStore
 {
-    private static readonly byte[] Entropy =
-        Encoding.UTF8.GetBytes("AutoUpdater.Client.DatabaseSettings.v1");
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        WriteIndented = true
-    };
-
-    public static string GetDefaultPath(string installationDirectory) =>
-        Path.Combine(
-            Path.GetFullPath(installationDirectory),
-            "AutoUpdater",
-            "client-settings.json");
+    public const string DefaultHostExecutableName = "卷绕机.exe";
 
     public static string? TryLoadFromApplicationConfig(
         string installationDirectory,
@@ -42,163 +19,60 @@ public static class ClientDatabaseSettingsStore
         out string message)
     {
         var directory = Path.GetFullPath(installationDirectory);
-        var candidates = new List<string>();
-        if (!string.IsNullOrWhiteSpace(applicationExecutable))
+        var executable = string.IsNullOrWhiteSpace(applicationExecutable)
+            ? DefaultHostExecutableName
+            : applicationExecutable;
+        var executablePath = Path.IsPathRooted(executable)
+            ? executable
+            : Path.Combine(directory, executable);
+        var configPath = Path.GetFullPath(executablePath) + ".config";
+        if (!File.Exists(configPath))
         {
-            var executablePath = Path.IsPathRooted(applicationExecutable)
-                ? applicationExecutable
-                : Path.Combine(directory, applicationExecutable);
-            candidates.Add(Path.GetFullPath(executablePath) + ".config");
-        }
-        if (!string.IsNullOrWhiteSpace(Environment.ProcessPath))
-            candidates.Add(Path.GetFullPath(Environment.ProcessPath) + ".config");
-        if (Directory.Exists(directory))
-            candidates.AddRange(
-                Directory.EnumerateFiles(
-                    directory, "*.exe.config", SearchOption.TopDirectoryOnly));
-
-        foreach (var path in candidates.Distinct(
-                     StringComparer.OrdinalIgnoreCase))
-        {
-            if (!File.Exists(path)) continue;
-            try
-            {
-                var document = XDocument.Load(
-                    path, LoadOptions.None);
-                var values = document
-                    .Descendants()
-                    .Where(element =>
-                        element.Name.LocalName.Equals(
-                            "add", StringComparison.OrdinalIgnoreCase))
-                    .SelectMany(element => new[]
-                    {
-                        element.Attribute("connectionString")?.Value,
-                        element.Attribute("value")?.Value
-                    })
-                    .Where(value => !string.IsNullOrWhiteSpace(value));
-                foreach (var value in values)
-                {
-                    try
-                    {
-                        var builder =
-                            new MySqlConnectionStringBuilder(value!);
-                        if (string.IsNullOrWhiteSpace(builder.Server) ||
-                            string.IsNullOrWhiteSpace(builder.Database) ||
-                            string.IsNullOrWhiteSpace(builder.UserID))
-                            continue;
-                        builder.ConnectionTimeout = 10;
-                        builder.DefaultCommandTimeout = 30;
-                        builder.Pooling = true;
-                        message = $"已读取上位机配置：{path}";
-                        return builder.ConnectionString;
-                    }
-                    catch (ArgumentException)
-                    {
-                        // 该配置项不是MySQL连接串，继续检查其他项。
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                message = $"上位机配置无法读取：{path}：{ex.Message}";
-                return null;
-            }
-        }
-        message = "未在上位机 .config 中找到标准MySQL连接串。";
-        return null;
-    }
-
-    public static async Task SaveAsync(
-        string installationDirectory,
-        MySqlConnectionStringBuilder source,
-        CancellationToken cancellationToken = default)
-    {
-        if (string.IsNullOrWhiteSpace(source.Server))
-            throw new ArgumentException("MySQL服务器不能为空。");
-        if (string.IsNullOrWhiteSpace(source.Database))
-            throw new ArgumentException("数据库名不能为空。");
-        if (string.IsNullOrWhiteSpace(source.UserID))
-            throw new ArgumentException("用户名不能为空。");
-
-        var protectedPassword = ProtectedData.Protect(
-            Encoding.UTF8.GetBytes(source.Password),
-            Entropy,
-            DataProtectionScope.CurrentUser);
-        var settings = new ClientDatabaseSettings(
-            source.Server,
-            source.Port,
-            source.Database,
-            source.UserID,
-            Convert.ToBase64String(protectedPassword),
-            source.SslMode.ToString());
-        var path = GetDefaultPath(installationDirectory);
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        var temporaryPath = path + ".tmp";
-        try
-        {
-            await File.WriteAllTextAsync(
-                temporaryPath,
-                JsonSerializer.Serialize(settings, JsonOptions),
-                Encoding.UTF8,
-                cancellationToken);
-            File.Move(temporaryPath, path, overwrite: true);
-        }
-        finally
-        {
-            if (File.Exists(temporaryPath))
-                File.Delete(temporaryPath);
-        }
-    }
-
-    public static string? TryLoadConnectionString(
-        string installationDirectory,
-        out string message)
-    {
-        var path = GetDefaultPath(installationDirectory);
-        if (!File.Exists(path))
-        {
-            message = $"未找到数据库配置：{path}";
+            message = $"未找到上位机数据库配置：{configPath}";
             return null;
         }
+
         try
         {
-            var settings =
-                JsonSerializer.Deserialize<ClientDatabaseSettings>(
-                    File.ReadAllText(path),
-                    new JsonSerializerOptions
-                    {
-                        PropertyNameCaseInsensitive = true
-                    })
-                ?? throw new InvalidDataException("数据库配置内容为空。");
-            var passwordBytes = ProtectedData.Unprotect(
-                Convert.FromBase64String(settings.EncryptedPassword),
-                Entropy,
-                DataProtectionScope.CurrentUser);
-            if (!Enum.TryParse<MySqlSslMode>(
-                    settings.SslMode,
-                    ignoreCase: true,
-                    out var sslMode))
-                throw new InvalidDataException(
-                    $"不支持的SSL模式：{settings.SslMode}");
-            var builder = new MySqlConnectionStringBuilder
+            var document = XDocument.Load(configPath, LoadOptions.None);
+            var values = document
+                .Descendants()
+                .Where(element =>
+                    element.Name.LocalName.Equals(
+                        "add", StringComparison.OrdinalIgnoreCase))
+                .SelectMany(element => new[]
+                {
+                    element.Attribute("connectionString")?.Value,
+                    element.Attribute("value")?.Value
+                })
+                .Where(value => !string.IsNullOrWhiteSpace(value));
+            foreach (var value in values)
             {
-                Server = settings.Server,
-                Port = settings.Port,
-                Database = settings.Database,
-                UserID = settings.UserId,
-                Password = Encoding.UTF8.GetString(passwordBytes),
-                SslMode = sslMode,
-                ConnectionTimeout = 10,
-                DefaultCommandTimeout = 30,
-                Pooling = true
-            };
-            CryptographicOperations.ZeroMemory(passwordBytes);
-            message = $"已读取加密配置：{path}";
-            return builder.ConnectionString;
+                try
+                {
+                    var builder =
+                        new MySqlConnectionStringBuilder(value!);
+                    if (string.IsNullOrWhiteSpace(builder.Server) ||
+                        string.IsNullOrWhiteSpace(builder.Database) ||
+                        string.IsNullOrWhiteSpace(builder.UserID))
+                        continue;
+                    builder.ConnectionTimeout = 10;
+                    builder.DefaultCommandTimeout = 30;
+                    builder.Pooling = true;
+                    message = $"已读取上位机配置：{configPath}";
+                    return builder.ConnectionString;
+                }
+                catch (ArgumentException)
+                {
+                    // 该配置项不是MySQL连接串，继续检查其他项。
+                }
+            }
+            message = $"未在 {configPath} 中找到标准MySQL连接串。";
+            return null;
         }
         catch (Exception ex)
         {
-            message = $"数据库配置无法读取：{ex.Message}";
+            message = $"上位机配置无法读取：{configPath}：{ex.Message}";
             return null;
         }
     }
