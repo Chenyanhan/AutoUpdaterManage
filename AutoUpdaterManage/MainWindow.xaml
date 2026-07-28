@@ -372,9 +372,28 @@
 
                         <Border Grid.Row="2" Background="#EEF4FF" CornerRadius="7"
                                 Padding="12,8" Margin="0,11,0,0">
-                            <TextBlock x:Name="DatabaseStatusText"
-                                       Text="请选择SQLite数据库文件开始浏览"
-                                       Foreground="#315A97"/>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="310"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="同步包共享目录"
+                                           VerticalAlignment="Center"
+                                           Foreground="#315A97"/>
+                                <TextBox x:Name="DatabaseSyncDirectoryBox"
+                                         Grid.Column="1"
+                                         Margin="10,0,14,0"
+                                         Text="D:\UpdaterLab\DatabaseSyncOutput"
+                                         ToolTip="必须填写所有目标设备都能访问的本地路径或UNC共享路径"/>
+                                <TextBlock x:Name="DatabaseStatusText"
+                                           Grid.Column="2"
+                                           Text="请选择数据库开始浏览"
+                                           VerticalAlignment="Center"
+                                           TextTrimming="CharacterEllipsis"
+                                           ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}"
+                                           Foreground="#315A97"/>
+                            </Grid>
                         </Border>
                     </Grid>
                     <Border Background="White" CornerRadius="10" Padding="24" Margin="0,0,14,0">

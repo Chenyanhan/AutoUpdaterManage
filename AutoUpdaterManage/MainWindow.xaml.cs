@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Data;
+using System.IO;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
@@ -653,13 +654,34 @@ public partial class MainWindow : ThemedWindow
         if (MessageBox.Show(
                 $"将向 {selectedDevices.Length} 台设备下发 " +
                 $"{changes.Length} 条数据库变更。\n\n" +
-                "客户端将立即在事务中写入目标MySQL数据库；任意一条失败时整批回滚。是否继续？",
+                "管理端将生成带SHA-256校验的同步包，客户端读取并在事务中写入MySQL；" +
+                "任意一条失败时整批回滚。是否继续？",
                 "确认同步数据库变更",
                 MessageBoxButton.YesNo,
                 MessageBoxImage.Information) != MessageBoxResult.Yes)
             return;
 
         SyncDatabaseDraftsButton.IsEnabled = false;
+        SyncDatabaseDraftsButton.Content = "正在生成同步包…";
+        DatabaseSyncPackageInfo package;
+        try
+        {
+            package = await DatabaseSyncPackageBuilder.CreateAsync(
+                DatabaseSyncDirectoryBox.Text.Trim(),
+                databaseName,
+                changes);
+        }
+        catch (Exception ex)
+        {
+            SyncDatabaseDraftsButton.Content = "同步到设备";
+            SyncDatabaseDraftsButton.IsEnabled = true;
+            MessageBox.Show(
+                $"{ex.GetType().Name}：{ex.Message}",
+                "生成数据库同步包失败",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+            return;
+        }
         SyncDatabaseDraftsButton.Content = "正在同步…";
         var batch = new DatabaseSyncBatch(
             changes.Select(change => change.ChangeId).ToHashSet(),
@@ -691,12 +713,11 @@ public partial class MainWindow : ThemedWindow
                 {
                     device.UpdateResult = "正在下发数据库变更…";
                     var acknowledgement =
-                        await _controllerService.SendDatabaseSyncReliableAsync(
+                        await _controllerService.SendDatabaseSyncFileReliableAsync(
                             device.IpAddress,
                             device.UdpPort,
                             device.DeviceId,
-                            databaseName,
-                            changes,
+                            package,
                             requestId,
                             attempt =>
                             {
@@ -737,8 +758,12 @@ public partial class MainWindow : ThemedWindow
                         ex.Message);
                 }
             }
-            DatabaseStatusText.Text =
-                $"已向 {selectedDevices.Length} 台设备下发数据库同步任务";
+            if (batch.PendingDeviceIds.Count > 0)
+            {
+                DatabaseStatusText.Text =
+                    $"已下发同步包 {Path.GetFileName(package.Path)}，" +
+                    $"{package.Size / 1024d:F1} KB";
+            }
         }
         catch (Exception ex)
         {

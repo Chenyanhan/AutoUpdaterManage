@@ -4,6 +4,8 @@ using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Text.Json;
 using AutoUpdater.Protocol;
 
 namespace AutoUpdater.Client;
@@ -77,6 +79,10 @@ public sealed class EmbeddedUpdateClient : IDisposable
                 else if (!discoveryOnly &&
                          packet.Command == UdpCommand.DatabaseSyncRequest)
                     await HandleDatabaseSyncAsync(packet, datagram.RemoteEndPoint);
+                else if (!discoveryOnly &&
+                         packet.Command == UdpCommand.DatabaseSyncFileRequest)
+                    await HandleDatabaseSyncFileAsync(
+                        packet, datagram.RemoteEndPoint, cancellationToken);
             }
             catch (OperationCanceledException)
             {
@@ -293,6 +299,128 @@ public sealed class EmbeddedUpdateClient : IDisposable
             result.Message,
             result.Success ? request.Changes.Count : 0);
         _inflightDatabaseRequests.TryRemove(packet.RequestId, out _);
+    }
+
+    private async Task HandleDatabaseSyncFileAsync(
+        UdpPacket packet,
+        IPEndPoint controller,
+        CancellationToken cancellationToken)
+    {
+        var fileRequest =
+            UdpProtocol.DecodePayload<DatabaseSyncFileRequestPayload>(packet);
+        if (fileRequest is null ||
+            !string.Equals(
+                fileRequest.TargetDeviceId,
+                _options.DeviceId,
+                StringComparison.OrdinalIgnoreCase))
+            return;
+
+        await SendTaskReceivedAsync(packet.RequestId, controller);
+        if (_processedRequests.TryGet(packet.RequestId, out var processed))
+        {
+            await SendDatabaseSyncResultAsync(
+                packet.RequestId,
+                controller,
+                processed.Accepted,
+                processed.Message,
+                0);
+            return;
+        }
+
+        DatabaseSyncRequestPayload request;
+        try
+        {
+            var package = await LoadDatabaseSyncPackageAsync(
+                fileRequest, cancellationToken);
+            request = new DatabaseSyncRequestPayload(
+                fileRequest.SenderId,
+                fileRequest.TargetDeviceId,
+                package.DatabaseName,
+                package.Changes);
+        }
+        catch (Exception ex)
+        {
+            var failure = SaveDatabaseSyncResult(
+                packet.RequestId,
+                false,
+                $"同步包校验失败：{ex.Message}");
+            await SendDatabaseSyncResultAsync(
+                packet.RequestId,
+                controller,
+                false,
+                failure.Message,
+                0);
+            return;
+        }
+
+        var operation = _inflightDatabaseRequests.GetOrAdd(
+            packet.RequestId,
+            _ => new Lazy<Task<DatabaseSyncExecutionResult>>(
+                () => ExecuteDatabaseSyncAsync(packet.RequestId, request),
+                LazyThreadSafetyMode.ExecutionAndPublication));
+        var result = await operation.Value;
+        await SendDatabaseSyncResultAsync(
+            packet.RequestId,
+            controller,
+            result.Success,
+            result.Message,
+            result.Success ? request.Changes.Count : 0);
+        _inflightDatabaseRequests.TryRemove(packet.RequestId, out _);
+    }
+
+    private static async Task<DatabaseSyncPackage> LoadDatabaseSyncPackageAsync(
+        DatabaseSyncFileRequestPayload request,
+        CancellationToken cancellationToken)
+    {
+        const long maxPackageSize = 100L * 1024 * 1024;
+        if (request.PackageSize is <= 0 or > maxPackageSize)
+            throw new InvalidOperationException("同步包大小必须在1字节到100MB之间。");
+        if (string.IsNullOrWhiteSpace(request.PackagePath))
+            throw new InvalidOperationException("同步包路径不能为空。");
+        var path = Path.GetFullPath(request.PackagePath);
+        var file = new FileInfo(path);
+        if (!file.Exists)
+            throw new FileNotFoundException("找不到数据库同步包。", path);
+        if (file.Length != request.PackageSize)
+            throw new InvalidDataException(
+                $"同步包大小不一致，期望 {request.PackageSize}，实际 {file.Length}。");
+
+        await using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            81920,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var actualHash = await SHA256.HashDataAsync(stream, cancellationToken);
+        byte[] expectedHash;
+        try
+        {
+            expectedHash = Convert.FromHexString(request.Sha256);
+        }
+        catch (FormatException)
+        {
+            throw new InvalidDataException("同步包SHA-256格式无效。");
+        }
+        if (expectedHash.Length != actualHash.Length ||
+            !CryptographicOperations.FixedTimeEquals(expectedHash, actualHash))
+            throw new InvalidDataException("同步包SHA-256校验失败，文件可能已损坏或被篡改。");
+
+        stream.Position = 0;
+        var package = await JsonSerializer.DeserializeAsync<DatabaseSyncPackage>(
+                          stream,
+                          new JsonSerializerOptions
+                          {
+                              PropertyNameCaseInsensitive = true
+                          },
+                          cancellationToken)
+                      ?? throw new InvalidDataException("同步包内容为空。");
+        if (package.SchemaVersion != 1)
+            throw new InvalidDataException(
+                $"不支持同步包版本：{package.SchemaVersion}。");
+        if (package.Changes.Count == 0)
+            throw new InvalidDataException("同步包不包含数据库变更。");
+        return package;
     }
 
     private async Task<DatabaseSyncExecutionResult> ExecuteDatabaseSyncAsync(

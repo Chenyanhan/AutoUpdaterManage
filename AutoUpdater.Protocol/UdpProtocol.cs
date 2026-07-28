@@ -87,7 +87,8 @@ public enum UdpCommand : byte
     StatusQuery = 0x21,
     StatusResponse = 0x22,
     DatabaseSyncRequest = 0x30,
-    DatabaseSyncResult = 0x31
+    DatabaseSyncResult = 0x31,
+    DatabaseSyncFileRequest = 0x32
 }
 
 public readonly record struct UdpPacket(UdpCommand Command, Guid RequestId, byte[] Payload);
@@ -140,6 +141,20 @@ public sealed record DatabaseSyncResultPayload(
     bool Success,
     string Message,
     int AcceptedChanges);
+
+public sealed record DatabaseSyncFileRequestPayload(
+    string SenderId,
+    string TargetDeviceId,
+    string PackagePath,
+    long PackageSize,
+    string Sha256);
+
+public sealed record DatabaseSyncPackage(
+    int SchemaVersion,
+    Guid PackageId,
+    string DatabaseName,
+    DateTimeOffset CreatedAt,
+    IReadOnlyList<DatabaseChangePayload> Changes);
 
 internal static class Crc32
 {

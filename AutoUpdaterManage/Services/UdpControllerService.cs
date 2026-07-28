@@ -205,6 +205,36 @@ public sealed class UdpControllerService : IDisposable
             cancellationToken);
     }
 
+    public Task<DispatchAcknowledgement> SendDatabaseSyncFileReliableAsync(
+        string targetIp,
+        int targetPort,
+        string targetDeviceId,
+        DatabaseSyncPackageInfo package,
+        Guid requestId,
+        Action<int>? attemptStarted = null,
+        int maxAttempts = 3,
+        TimeSpan? acknowledgementTimeout = null,
+        CancellationToken cancellationToken = default)
+    {
+        var payload = new DatabaseSyncFileRequestPayload(
+            Environment.MachineName,
+            targetDeviceId,
+            package.Path,
+            package.Size,
+            package.Sha256);
+        var packet = UdpProtocol.Encode(
+            UdpCommand.DatabaseSyncFileRequest, requestId, payload);
+        return SendReliableAsync(
+            packet,
+            IPAddress.Parse(targetIp),
+            targetPort,
+            requestId,
+            attemptStarted,
+            maxAttempts,
+            acknowledgementTimeout ?? TimeSpan.FromSeconds(2),
+            cancellationToken);
+    }
+
     private async Task<DispatchAcknowledgement> SendReliableAsync(
         byte[] packet,
         IPAddress target,
